@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "brclio-pay",
+  "account_id": "c8b059429c868f6d0e528f9e10325f46",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {"node:util": "./src/safe-node-util.ts"},
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": true},
+  "vars": {
+    "PAY_BASE_URL": "https://pay.bornforthis.cn",
+    "ALIPAY_APP_ID": "2021007109602288",
+    "PAYMENT_MODE": "live",
+    "PAYMENT_ENABLED": "false",
+    "ALIPAY_CHANNELS": "page,wap",
+    "GITHUB_REPOSITORY": "BrclioData/Brclio-Alipay-Data",
+    "GITHUB_BRANCH": "main"
+  },
+  "triggers": {"crons": ["*/5 * * * *"]},
+  "observability": {"enabled": false}
+}
