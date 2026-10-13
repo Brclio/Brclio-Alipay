@@ -2,9 +2,13 @@
 import {readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
+import {execFileSync} from 'node:child_process';
 import {fetch,ProxyAgent} from 'undici';
 const [action='status']=process.argv.slice(2);
 if(!['status','add'].includes(action))throw new Error('Usage: node scripts/pages-domain.mjs status|add');
+// Let Wrangler refresh its OAuth session before reading the short-lived token.
+try{execFileSync(process.execPath,['node_modules/wrangler/bin/wrangler.js','whoami'],{stdio:'ignore',timeout:45_000});}
+catch{throw new Error('Cloudflare authentication unavailable; run npx wrangler login');}
 const config=readFileSync(join(homedir(),'Library/Preferences/.wrangler/config/default.toml'),'utf8');
 const token=/^oauth_token\s*=\s*"([^"]+)"/m.exec(config)?.[1];
 if(!token)throw new Error('Sign in with wrangler login first');
