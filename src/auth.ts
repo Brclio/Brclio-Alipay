@@ -1,7 +1,11 @@
 import {hmacSha256, sha256, safeEqualHex} from './crypto';
 import {clients, requireThat} from './config';
 import type {Env, ProductClient} from './types';
+export function authenticateHeaders(request:Request,now=Date.now()):void {
+  requireThat(/^[a-z0-9][a-z0-9_-]{1,63}$/.test(request.headers.get('X-Brclio-Client') || '') && /^\d{10}$/.test(request.headers.get('X-Brclio-Timestamp') || '') && Math.abs(now/1000-Number(request.headers.get('X-Brclio-Timestamp')))<=300 && /^[A-Za-z0-9_-]{16,80}$/.test(request.headers.get('X-Brclio-Nonce') || '') && /^[a-f0-9]{64}$/i.test(request.headers.get('X-Brclio-Signature') || '') && !new URL(request.url).search,401,'UNAUTHORIZED','请求签名无效或已过期');
+}
 export function authenticate(request: Request, rawBody: string, env: Env, now = Date.now()): ProductClient {
+  authenticateHeaders(request,now);
   const id = request.headers.get('X-Brclio-Client');
   const client = clients(env).find(c => c.id === id);
   const timestamp = request.headers.get('X-Brclio-Timestamp') || '';

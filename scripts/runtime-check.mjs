@@ -11,6 +11,7 @@ let runtime;
 let checks;
 let diagnostic;
 let sdkLogCount = 0;
+let nativeQueryCalls = 0;
 try {
   // Mirror Wrangler's builtin-module shims so CommonJS SDK dependencies import
   // workerd's native Node modules instead of leaving dynamic require() calls.
@@ -73,6 +74,16 @@ try {
       script: bundle.outputFiles[0].text,
       compatibilityDate: '2026-10-13',
       compatibilityFlags: ['nodejs_compat'],
+      outboundService:async request=>{
+        const url=new URL(request.url);
+        assert.equal(url.origin,'https://openapi-sandbox.dl.alipaydev.com');
+        assert.equal(url.searchParams.get('method'),'alipay.trade.query');
+        const fields=new URLSearchParams(url.searchParams);const signature=fields.get('sign');fields.delete('sign');
+        const content=[...fields].sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>`${key}=${value}`).join('&');
+        assert.equal(createVerify('RSA-SHA256').update(content,'utf8').verify(app.publicKey,signature,'base64'),true);
+        nativeQueryCalls++;
+        return new Response(queryResponse,{headers:{'Content-Type':'application/json'}});
+      },
       bindings: {
       RUNTIME_TOKEN: runtimeToken,
       ALIPAY_APP_ID: '2021007109602288',
@@ -107,7 +118,8 @@ try {
   const timestamp = Date.parse(`${payment.searchParams.get('timestamp').replace(' ', 'T')}+08:00`);
   assert.equal(Math.abs(timestamp - Date.now()) < 10_000, true);
   assert.equal(sdkLogCount, 0);
-  console.log(JSON.stringify({ workerdRuntime: true, ...result.checks, paymentRequestSignature: true, chinaTimestamp: true, sdkLogsSuppressed: true }));
+  assert.equal(nativeQueryCalls,1);
+  console.log(JSON.stringify({ workerdRuntime: true, ...result.checks, nativeQueryRequestSignature:true, paymentRequestSignature: true, chinaTimestamp: true, sdkLogsSuppressed: true }));
 } catch (error) {
   // Avoid printing provider errors, full signed URLs, bindings, or ephemeral keys.
   console.error(JSON.stringify({ workerdRuntime: false, errorType: error?.name ?? 'Error', ...checks, diagnostic }));

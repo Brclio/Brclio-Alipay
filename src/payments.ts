@@ -11,7 +11,7 @@ const eventId = (id:string) => `evt_${id}`;
 const deliveryPath = (id:string) => `events/${id}.json`;
 const emptyQueue = ():WorkQueue => ({orders:[],deliveries:[]});
 export class Payments {
-  constructor(public env:Env,public store:Store,public gateway:Gateway,public now:()=>number=Date.now,public send:typeof fetch=fetch) {}
+  constructor(public env:Env,public store:Store,public gateway:Gateway,public now:()=>number=Date.now,public send:typeof fetch=(input,init)=>globalThis.fetch(input,init)) {}
   async order(id:string):Promise<Order> {
     requireThat(/^pay_[a-f0-9]{32}$/.test(id),404,'NOT_FOUND','订单不存在');
     const order = await this.store.readJson<Order>(orderPath(id));
@@ -118,7 +118,7 @@ export class Payments {
     const body=JSON.stringify(delivery.event);const timestamp=String(Math.floor(now/1000));
     let status=0;
     try {
-      const response=await this.send(client.webhookUrl,{method:'POST',redirect:'error',signal:AbortSignal.timeout(10_000),headers:{'Content-Type':'application/json','X-Brclio-Event':id,'X-Brclio-Timestamp':timestamp,'X-Brclio-Signature':hmacSha256(client.webhookSecret,timestamp+'.'+body)},body});
+      const response=await this.send(client.webhookUrl,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(10_000),headers:{'Content-Type':'application/json','X-Brclio-Event':id,'X-Brclio-Timestamp':timestamp,'X-Brclio-Signature':hmacSha256(client.webhookSecret,timestamp+'.'+body)},body});
       status=response.status;await response.body?.cancel();
     } catch { /* Durable retry remains queued. Never log payment bodies. */ }
     await this.store.transaction(async tx=>{

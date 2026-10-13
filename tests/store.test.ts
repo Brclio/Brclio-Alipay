@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { ConflictError, GitHubError, GitHubStore } from '../src/store';
@@ -53,7 +53,7 @@ class FakeGitHub {
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
     this.calls.push({ path, method, body });
-    expect(init?.redirect).toBe('error');
+    expect(init?.redirect).toBe('manual');
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer fixture-token');
     if (!path) return json({ private: this.privateRepo });
     if (path === '/git/ref/heads/main') return json({ ref: 'refs/heads/main', object: { type: 'commit', sha: this.head } });
@@ -187,6 +187,13 @@ describe('private GitHub payment storage', () => {
     github.contentOverride = { type: 'file', sha: hash('bad'), encoding: 'base64', size: 3, content: Buffer.from('bad').toString('base64') };
     await expect(store.readJson('system/data.json')).rejects.toMatchObject({ code: 'INVALID_DATA_FILE' });
     expect(github.successfulUpdates).toBe(0);
+  });
+
+  it('rejects redirects without forwarding repository credentials', async () => {
+    const send=vi.fn(async(_url:RequestInfo | URL,init?:RequestInit)=>{expect(init?.redirect).toBe('manual');return new Response(null,{status:302,headers:{Location:'https://untrusted.example/'}});});
+    const store=new GitHubStore({token:'fixture-token',repository:'owner/private-data',fetch:send as typeof fetch});
+    await expect(store.readJson('system/data.json')).rejects.toMatchObject({status:302,code:'GITHUB_REQUEST_FAILED'});
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it('sanitizes exhausted transport failures and bounds network retries', async () => {

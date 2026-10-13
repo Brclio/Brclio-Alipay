@@ -1,39 +1,35 @@
 # Brclio Pay 产品接入指南（交给 AI 即可）
 
-支付中心：`https://pay.bornforthis.cn`。先完成部署与商户配置；以 `/api/health` 的 `ready:true`、`acceptingPayments:true` 为准。**当前首页可访问不等于已开通真实收款。**
+支付中心：`https://pay.bornforthis.cn`，接入管理：`https://pay.bornforthis.cn/admin`。当前 `PAYMENT_ENABLED=false`，正式审核和真实收款仍待验证。`ready:true` 仅表示配置齐全，首页或后台可访问都不证明真实付款成功。
+
+推荐在 `/admin` 登录后生成并复制完整 AI 接入任务：内含通用 Skill、单平台新增/更新范围、允许域名和最长 2 小时的授权。AI 无需附件即可读取 Skill，并用同一 Bearer 授权下载辅助脚本，详见 [管理后台](admin.md)。以下协议供实现和检查产品后端使用。
 
 ## 直接给产品开发 AI 的任务
 
 > 为当前产品接入 Brclio Pay，阅读本文件及 examples/payment-client.mjs、examples/webhook-handler.mjs。先检查现有登录、业务订单和权益存储。新增登录用户的后端下单接口，商品使用支付中心登记的 SKU；业务订单绑定当前用户，金额来自服务端商品配置。把支付中心返回的 checkoutUrl 交给网页/桌面/安卓客户端，用浏览器打开。实现 HTTPS 支付通知接口，基于原始请求体验签，校验 mode=live、clientId、业务订单归属、SKU、金额与币种；在一个持久事务中去重 event.id 并开通权益，事务提交后才返回 2xx。实现当前用户订单查询和返回页，返回参数只定位订单，禁止据此认定成功。服务端密钥通过 Secret 管理，禁止进入前端、客户端包、Git、日志。保留原有业务功能。完成签名错误、金额错误、跨用户访问、重复通知和失败重试测试；验收须证明实际权益落库。没有实际产品价格/回调域名时先准备实现并列出缺失项，不编造商品，不执行真实付款。
 
-## 1. 注册产品
+## 1. 注册或更新一个产品
 
-每个产品一个 `clientId`、独立 `apiSecret` 和 `webhookSecret`，一个固定 HTTPS 回调地址、返回域名白名单和商品目录。所有密钥只存服务端。
+每个产品一个 `clientId`、独立 `apiSecret` 和 `webhookSecret`、固定 HTTPS 回调、返回来源和商品目录。所有密钥只存产品可信后端。更新时保留原密钥，不重置原产品订单、权益或其他支付提供方。
 
-在支付中心项目运行（下面为示例，换成真实商品、价格和已实现的地址）：
+管理员可在 `/admin` 手动预览保存，或签发单平台 AI 任务。`mode=create/update` 表示新增/更新操作，`paymentMode=live/sandbox` 才是支付环境。临时令牌不进入源码、计划、日志或通用 Skill；不会授予管理员、支付宝、GitHub 或其他平台凭据。
 
-```sh
-node scripts/bootstrap.mjs
-node scripts/add-product.mjs my-product '产品名' https://app.brclio.com/api/payments/webhook https://app.brclio.com pro-month 9.90 '产品月度权益'
-```
+受限 AI 流程：
 
-脚本生成本机 `secrets/clients.json` 和 `secrets/my-product-product.env`，不输出密钥。把后者通过 Secret 管理导入产品**后端**，把 clients.json 作为支付中心 `CLIENTS_JSON` Secret 发布。已有产品需要增加 SKU 或返回域名时，保留原密钥，修改本地 JSON 后重新发布。
+1. `GET /api/integration/v1/skill.zip` 下载通用包，解压到任务临时目录，先检查原业务代码。
+2. `GET /api/integration/v1/context` 读取目标配置、允许域名、支付环境和 `client.version`。新平台版本为 `absent`，创建前没有长期凭证。
+3. `POST /api/integration/v1/plan` 提交 `{config,expectedVersion}`，核对 `before`、`after` 和目标；计划最多 15 分钟且受授权到期时间限制。
+4. `POST /api/integration/v1/apply` 提交 `{planId}`。再次按目标平台版本和域名范围校验，返回配置及目标凭证。重复应用已完成的同一计划返回原结果。
 
-配置示意（值是占位符，不能直接上线）：
+以上接入 API 使用 `Authorization: Bearer 临时令牌`，不用产品 HMAC，也不把令牌放到 query。授权最长 2 小时且可撤销，不能扩大目标；撤销不回滚已应用配置或撤销已交付的长期凭证。对产品仓库的编辑和发布仍需当前用户授权。
 
-```json
-[{
-  "id":"my-product",
-  "name":"产品名",
-  "apiSecret":"至少32字符的独立随机密钥",
-  "webhookSecret":"另一份至少32字符的随机密钥",
-  "webhookUrl":"https://app.brclio.com/api/payments/webhook",
-  "returnOrigins":["https://brclio.com","https://app.brclio.com"],
-  "skus":{"pro-month":{"subject":"产品月度权益","amount":"9.90"}}
-}]
-```
+409 版本冲突时重新读取并核对差异，不能强制覆盖。变更只针对目标平台，保存其他平台、原长期密钥和未请求修改的字段。配置字段为 `id`、`name`、`webhookUrl`、`returnOrigins`、`skus`、`enabled`，不包含凭证。
 
-推荐精确返回域名；确有需要可登记 `https://*.brclio.com`，它只匹配子域名，不匹配根域名、不匹配 `brclio.com.evil.tld`。回调地址只能由支付中心配置，调用者无法自行指定；它必须是你控制的公网 HTTPS 域名。
+推荐精确来源；确有需要可登记 `https://*.brclio.com`，只匹配子域名，不匹配根域名或 `brclio.com.evil.tld`。新增或修改的 webhook 来源和返回来源须符合授权域名范围。产品日常下单不能自行指定 webhook，它必须是你控制的公网 HTTPS 域名。
+
+改价只影响新订单，历史订单金额保持不变。回调修改影响待投递通知，需先部署新接收端并安排过渡。停止平台阻止新订单和新发起付款，已有支付确认及重试继续处理。
+
+平台注册表与长期凭证加密保存在私有 GitHub 仓库。旧 `scripts/add-product.mjs` / `CLIENTS_JSON` 仅适用于加密记录尚不存在的初始化；已有加密记录由后台管理，修改 legacy Secret 不会替换它，解密失败也不回退。不要用旧脚本全量覆盖已接入平台，加密 key 必须保留，详见 [部署](deployment.md)。
 
 ## 2. 产品后端创建订单
 
@@ -129,7 +125,7 @@ const order = await pay.getOrder(paymentOrderId); // GET /api/v1/orders/:id
 const refreshed = await pay.refreshOrder(paymentOrderId); // POST .../:id/refresh
 ```
 
-查询只允许该产品的订单。产品还须限制为当前登录用户自己的业务订单。`refresh` 主动向支付宝查单，单订单最多每60秒一次；普通 GET 不调用支付宝，不写订单。不要每秒轮询，建议每15~30秒，停止等待后关闭轮询。
+查询只允许该产品的订单。产品还须限制为当前登录用户自己的业务订单。`refresh` 主动向支付宝查单，单订单最多每60秒一次；普通 GET 不调用支付宝，不写订单。读取仍消耗 GitHub API 配额，优先低频或按需查询，停止等待后关闭轮询。
 
 返回地址附带 `payment_order_id`、`product_order_id`；这两个字段都可被用户伪造，只用于找订单。返回页调用产品自己的后端查单。必须确认 `status=PAID`、`mode=live`、正确 SKU 和金额，再走与 webhook 相同的幂等权益事务（或等待回调）。`PENDING` 不能开通，`CLOSED` 不能继续付款。过期但尚未查到支付宝终态的订单可能仍为 PENDING，收银台会阻止再次发起。
 

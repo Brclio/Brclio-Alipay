@@ -230,6 +230,15 @@ describe('reconciliation and durable delivery', () => {
     expect(await f.store.readJson<Delivery>(`events/evt_${id}.json`)).toMatchObject({ attempts: 0, event: { data: { orderId: id, amount: '9.90' } } });
   });
 
+  it('keeps redirected notifications pending without forwarding their signed payload',async()=>{
+    const send=vi.fn(async(_url:RequestInfo | URL,options?:RequestInit)=>{expect(options?.redirect).toBe('manual');return new Response(null,{status:302,headers:{Location:'https://untrusted.example/'}});});
+    const f=fixture(send as typeof fetch);const created=await f.create();await f.payments.notification(f.notify(String(created.id)));
+    const event=`evt_${created.id}`;await f.payments.deliver(event,client);
+    const delivery=await f.store.readJson<Delivery>(`events/${event}.json`);
+    expect(delivery?.lastStatus).toBe(302);expect(delivery?.deliveredAt).toBeUndefined();
+    expect((await f.payments.order(String(created.id))).fulfillmentStatus).toBe('pending');expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a failed webhook queued and retries the same signed event successfully', async () => {
     const send = vi.fn(async () => new Response('retry', { status: 503 }));
     send.mockImplementationOnce(async () => new Response('retry', { status: 503 }));
@@ -255,7 +264,7 @@ describe('reconciliation and durable delivery', () => {
       const timestamp = headers.get('X-Brclio-Timestamp')!;
       expect(headers.get('X-Brclio-Event')).toBe(event);
       expect(headers.get('X-Brclio-Signature')).toBe(hmacSha256(client.webhookSecret, timestamp + '.' + init.body));
-      expect(init.redirect).toBe('error');
+      expect(init.redirect).toBe('manual');
     }
     expect(await f.store.readJson<Delivery>(`events/${event}.json`)).toMatchObject({ attempts: 2, lastStatus: 204, event: { id: event } });
     expect((await f.payments.order(id)).fulfillmentStatus).toBe('delivered');

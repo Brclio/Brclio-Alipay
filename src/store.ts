@@ -108,7 +108,9 @@ export class GitHubStore implements Store {
     this.repository = config.repository;
     this.branch = branch;
     this.branchPath = branch.split('/').map(encodeURIComponent).join('/');
-    this.fetcher = config.fetch ?? globalThis.fetch;
+    // workerd's native fetch requires its global receiver; calling it as
+    // this.fetcher(...) would otherwise bind the GitHubStore as `this`.
+    this.fetcher = config.fetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   private async request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
@@ -125,7 +127,7 @@ export class GitHubStore implements Store {
             'x-github-api-version': '2022-11-28',
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          redirect: 'error',
+          redirect: 'manual',
           signal: AbortSignal.timeout(10_000),
         });
       } catch {

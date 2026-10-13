@@ -179,7 +179,7 @@ export function createAlipay(env: AlipayEnvironment, fetcher: typeof fetch = glo
         const response = await fetcher(url, {
           method: 'GET',
           headers: { accept: 'application/json' },
-          redirect: 'error',
+          redirect: 'manual',
           signal: AbortSignal.timeout(8000),
         });
         if (response.status !== 200) {

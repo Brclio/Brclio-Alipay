@@ -44,7 +44,7 @@ describe('official Alipay SDK RSA2 adapter', () => {
     let requestUrl = '';
     const alipay = createAlipay(env, transport(signedEnvelope(trade, undefined, true), (url, options) => {
       requestUrl = url;
-      expect(options?.redirect).toBe('error');
+      expect(options?.redirect).toBe('manual');
     }));
     expect(await alipay.query('pay_test')).toEqual({
       outTradeNo: 'pay_test', tradeNo: trade.trade_no, tradeStatus: 'TRADE_SUCCESS',
@@ -54,6 +54,12 @@ describe('official Alipay SDK RSA2 adapter', () => {
     expect(request.hostname).toBe('openapi-sandbox.dl.alipaydev.com');
     expect(request.searchParams.get('method')).toBe('alipay.trade.query');
     expect(JSON.parse(request.searchParams.get('biz_content')!)).toEqual({ out_trade_no: 'pay_test' });
+  });
+
+  it('rejects a gateway redirect without following the signed query URL',async()=>{
+    const send=vi.fn(async(_url:RequestInfo | URL,options?:RequestInit)=>{expect(options?.redirect).toBe('manual');return new Response(signedEnvelope(trade),{status:302,headers:{Location:'https://untrusted.example/'}});});
+    await expect(createAlipay(env,send as typeof fetch).query('pay_test')).rejects.toMatchObject({code:'ALIPAY_HTTP_ERROR'});
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it('rejects unsigned and tampered responses before trusting business fields', async () => {

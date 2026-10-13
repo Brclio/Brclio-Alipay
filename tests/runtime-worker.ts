@@ -52,6 +52,8 @@ export default {
     }
     phase = 'query';
     const query = await alipay.query('pay_runtime');
+    phase = 'native-fetch-query';
+    const nativeQuery=await createAlipay(env).query('pay_runtime');
     const form = Object.fromEntries(new URLSearchParams(env.NOTIFICATION_FORM));
     let invalidRejected = false;
     try {
@@ -69,6 +71,7 @@ export default {
         randomness: /^pay_[a-f0-9]{32}$/.test(randomId('pay_')) && /^[a-f0-9]{48}$/.test(nonce) && nonce !== randomNonce(),
         notification: alipay.verifyNotification(form),
         queryVerified: query?.tradeStatus === 'TRADE_SUCCESS' && query.totalAmount === '1.00' && query.outTradeNo === 'pay_runtime',
+        nativeFetchQueryVerified: nativeQuery?.tradeStatus === 'TRADE_SUCCESS' && nativeQuery.totalAmount === '1.00' && nativeQuery.outTradeNo === 'pay_runtime',
         invalidRejected,
         ...diagnostics,
       },

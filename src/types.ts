@@ -14,6 +14,14 @@ export interface Env {
   GITHUB_BRANCH: string;
   CHECKOUT_SECRET: string;
   CLIENTS_JSON: string;
+  REGISTRY_ENCRYPTION_KEY?: string;
+  ADMIN_EMAIL?: string;
+  ADMIN_PASSWORD_HASH?: string;
+  ADMIN_PASSWORD_PEPPER?: string;
+  ADMIN_SESSION_SECRET?: string;
+  ADMIN_LOGIN_LIMITER?: {limit(options:{key:string}):Promise<{success:boolean}>};
+  INTEGRATION_LIMITER?: {limit(options:{key:string}):Promise<{success:boolean}>};
+  PAYMENT_API_LIMITER?: {limit(options:{key:string}):Promise<{success:boolean}>};
 }
 export interface ProductClient {
   id: string;
@@ -23,6 +31,7 @@ export interface ProductClient {
   webhookUrl: string;
   returnOrigins: string[];
   skus: Record<string, {subject: string; amount: string}>;
+  enabled?: boolean;
 }
 export interface Order {
   id: string;

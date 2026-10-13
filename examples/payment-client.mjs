@@ -9,7 +9,7 @@ export function createPaymentClient({baseUrl='https://pay.bornforthis.cn',client
     const body=value===undefined?'':JSON.stringify(value);
     const timestamp=String(Math.floor(Date.now()/1000));const nonce=randomBytes(24).toString('hex');
     const signature=hmac(apiSecret,[method,path,timestamp,nonce,hash(body)].join('\n'));
-    const response=await fetcher(new URL(path,baseUrl),{method,redirect:'error',signal:AbortSignal.timeout(30_000),headers:{'Content-Type':'application/json','X-Brclio-Client':clientId,'X-Brclio-Timestamp':timestamp,'X-Brclio-Nonce':nonce,'X-Brclio-Signature':signature},...(body?{body}:{})});
+    const response=await fetcher(new URL(path,baseUrl),{method,redirect:'manual',signal:AbortSignal.timeout(30_000),headers:{'Content-Type':'application/json','X-Brclio-Client':clientId,'X-Brclio-Timestamp':timestamp,'X-Brclio-Nonce':nonce,'X-Brclio-Signature':signature},...(body?{body}:{})});
     const result=await response.json();
     if(!response.ok)throw new Error(result.error?.message || `Payment API HTTP ${response.status}`);
     return result;
