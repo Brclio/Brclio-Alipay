@@ -7,7 +7,7 @@ import type {Env,ProductClient} from './types';
 import {handleAdmin} from './admin';
 import {handleIntegration} from './integration';
 import {Registry} from './registry';
-import {hmacSha256} from './crypto';
+import {hmacSha256,sha256} from './crypto';
 
 function json(value:unknown,status=200):Response {return Response.json(value,{status});}
 function secure(response:Response):Response {
@@ -56,7 +56,7 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
       const key=hmacSha256(env.CHECKOUT_SECRET || 'unconfigured',JSON.stringify([env.GITHUB_REPOSITORY,env.PAYMENT_ENABLED,env.CLIENTS_JSON,env.REGISTRY_ENCRYPTION_KEY]));
       if(healthCache?.key===key && healthCache.until>Date.now())return secure(json(healthCache.value));
       let ready=false;try{ready=configurationReady(await runtimeEnv(env,provided?.store));}catch{/* report availability only */}
-      const value={service:'Brclio Pay',version:'0.2.0',ready,acceptingPayments:ready && env.PAYMENT_ENABLED==='true',mode:env.PAYMENT_MODE || 'live'};
+      const value={service:'Brclio Pay',version:'0.3.0',ready,acceptingPayments:ready && env.PAYMENT_ENABLED==='true',mode:env.PAYMENT_MODE || 'live'};
       healthCache={key,until:Date.now()+15000,value};return secure(json(value));
     }
     if(path.startsWith('/api/admin/'))return secure(await handleAdmin(request,env,provided?.store || storeFor(env)));
@@ -85,7 +85,7 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
     if(path==='/api/alipay/notify') {
       requireThat(request.method==='POST',405,'METHOD_NOT_ALLOWED','请求方法不支持');
       requireThat(request.headers.get('Content-Type')?.split(';')[0].trim()==='application/x-www-form-urlencoded',415,'INVALID_CONTENT_TYPE','通知类型错误');
-    } else if(path==='/api/v1/orders' || productMatch) {
+    } else if(path==='/api/v1/orders' || path==='/api/v1/catalog' || productMatch) {
       requireThat(request.method===(path==='/api/v1/orders' || productMatch?.[2]?'POST':'GET'),405,'METHOD_NOT_ALLOWED','请求方法不支持');
       authenticateHeaders(request);
     } else if(checkoutMatch) {
@@ -100,6 +100,12 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
     env=await runtimeEnv(env,provided?.store);
     requireReady(env,false);
     const payments=provided || service(env);
+    if(path==='/api/v1/catalog') {
+      const raw=await readBody(request);requireThat(raw==='',400,'INVALID_REQUEST','目录接口不接受请求体');
+      const client=authenticate(request,raw,env);
+      const skus=Object.fromEntries(Object.entries(client.skus).sort(([a],[b])=>a.localeCompare(b)).map(([sku,item])=>[sku,{...item,enabled:item.enabled!==false}]));
+      return secure(json({clientId:client.id,name:client.name,enabled:client.enabled!==false,mode:env.PAYMENT_MODE,currency:'CNY',version:sha256(JSON.stringify(skus)),skus}));
+    }
     if (path==='/api/alipay/notify' && request.method==='POST') {
       requireThat(request.headers.get('Content-Type')?.split(';')[0].trim()==='application/x-www-form-urlencoded',415,'INVALID_CONTENT_TYPE','通知类型错误');
       const raw=await readBody(request,32_768);const form=new URLSearchParams(raw);const data:Record<string,string>=Object.create(null);

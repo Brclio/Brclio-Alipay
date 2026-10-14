@@ -2,6 +2,7 @@ import type {Env,Order,ProductClient,Store,Delivery,WorkQueue} from './types';
 import {allowedReturn,money,requireThat} from './config';
 import {sha256,hmacSha256,randomId} from './crypto';
 import {checkoutToken} from './auth';
+import {indexOrder} from './reporting';
 export interface Trade {
   outTradeNo: string; tradeNo: string; tradeStatus: string; totalAmount: string; sellerId?: string; paidAt?: string;
 }
@@ -36,13 +37,16 @@ export class Payments {
         const previous = await tx.read<Order>(orderPath(existing.id));
         requireThat(previous?.mode===this.env.PAYMENT_MODE,409,'ENVIRONMENT_MISMATCH','订单不属于当前支付环境');
         requireThat(previous && previous.requestHash === requestHash,409,'IDEMPOTENCY_CONFLICT','相同业务订单号不能修改商品、金额或返回地址');
+        await indexOrder(tx,previous);
         return previous;
       }
+      requireThat(item.enabled!==false,403,'SKU_DISABLED','该商品已停售');
       const queue = await tx.read<WorkQueue>('system/queue.json') || emptyQueue();
       requireThat(queue.orders.length < 2000,503,'CAPACITY','待支付订单过多，请稍后再试');
       const created:Order = {id,mode:this.env.PAYMENT_MODE,clientId:client.id,productOrderId:input.productOrderId as string,sku:input.sku as string,subject:item.subject,amount:money(item.amount),status:'PENDING',createdAt:new Date(now).toISOString(),expiresAt:new Date(now+30*60_000).toISOString(),returnUrl,requestHash,fulfillmentStatus:'pending'};
       tx.put(orderPath(id),created); tx.put(index,{id});
       queue.orders.push(id); tx.put('system/queue.json',queue);
+      await indexOrder(tx,created);
       return created;
     });
     return {...this.view(order,client), checkoutUrl:`${this.env.PAY_BASE_URL}/checkout/${order.id}#token=${checkoutToken(order.id,this.env)}`, productOrderId:order.productOrderId,sku:order.sku};
@@ -61,7 +65,7 @@ export class Payments {
       requireThat(order.mode===this.env.PAYMENT_MODE,409,'ENVIRONMENT_MISMATCH','订单不属于当前支付环境');
       requireThat(money(trade.totalAmount) === order.amount && (!trade.sellerId || trade.sellerId === this.env.ALIPAY_SELLER_ID),400,'PAYMENT_MISMATCH','交易信息与订单不匹配');
       requireThat(!order.tradeNo || order.tradeNo === trade.tradeNo,400,'PAYMENT_MISMATCH','支付宝交易号不匹配');
-      if (order.status === 'PAID') return order;
+      if (order.status === 'PAID') {await indexOrder(tx,order);return order;}
       if (['TRADE_SUCCESS','TRADE_FINISHED'].includes(trade.tradeStatus)) {
         requireThat(/^\d{10,64}$/.test(trade.tradeNo),400,'PAYMENT_MISMATCH','支付宝交易号无效');
         order.status='PAID'; order.tradeNo=trade.tradeNo; order.paidAt=now;
@@ -78,6 +82,7 @@ export class Payments {
         queue.orders=queue.orders.filter(x=>x!==order.id); tx.put('system/queue.json',queue);
       } else return order;
       tx.put(orderPath(order.id),order);
+      await indexOrder(tx,order);
       return order;
     });
   }
@@ -128,7 +133,7 @@ export class Payments {
       if (status>=200 && status<300) {
         d.deliveredAt=new Date(this.now()).toISOString();
         const order=await tx.read<Order>(orderPath(d.event.data.orderId));
-        if (order) {order.fulfillmentStatus='delivered';tx.put(orderPath(order.id),order);}
+        if (order) {order.fulfillmentStatus='delivered';tx.put(orderPath(order.id),order);await indexOrder(tx,order);}
         const queue=await tx.read<WorkQueue>('system/queue.json') || emptyQueue();
         queue.deliveries=queue.deliveries.filter(x=>x!==id);tx.put('system/queue.json',queue);
       } else d.nextAttemptAt=new Date(this.now()+Math.min(24*3600_000,30_000*2**Math.min(d.attempts,12))).toISOString();

@@ -16,6 +16,8 @@ export function createPaymentClient({baseUrl='https://pay.bornforthis.cn',client
   }
   function checkedId(id){if(!/^pay_[a-f0-9]{32}$/.test(id))throw new Error('Invalid payment order ID');return id;}
   return {
+    // Read through the product backend; do not cache indefinitely in a frontend or build.
+    catalog:()=>call('GET','/api/v1/catalog'),
     createOrder:({productOrderId,sku,returnUrl})=>call('POST','/api/v1/orders',{productOrderId,sku,returnUrl}),
     getOrder:id=>call('GET',`/api/v1/orders/${checkedId(id)}`),
     refreshOrder:id=>call('POST',`/api/v1/orders/${checkedId(id)}/refresh`,{})

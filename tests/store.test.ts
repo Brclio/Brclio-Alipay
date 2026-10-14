@@ -106,6 +106,34 @@ class FakeGitHub {
 }
 
 describe('private GitHub payment storage', () => {
+  it('provides bounded immutable listings and blob reads even after the branch advances', async () => {
+    const github = new FakeGitHub({ 'orders/pay_one.json': { status: 'PENDING' }, 'system/private.json': { secret: 'fixture' } });
+    const store = github.store();
+    const snapshot = await store.openSnapshot();
+    expect(snapshot.listJsonPaths('orders/')).toEqual(['orders/pay_one.json']);
+    const oldRevision = snapshot.revision;
+    await store.transaction(async tx => {
+      tx.put('orders/pay_one.json', { status: 'PAID' });
+      tx.put('orders/pay_two.json', { status: 'PENDING' });
+    });
+    expect(await snapshot.readJson('orders/pay_one.json')).toEqual({ status: 'PENDING' });
+    expect(snapshot.listJsonPaths('orders/')).toEqual(['orders/pay_one.json']);
+    const fresh = await store.openSnapshot();
+    expect(fresh.revision).not.toBe(oldRevision);
+    expect(fresh.listJsonPaths('orders/')).toEqual(['orders/pay_one.json', 'orders/pay_two.json']);
+    expect(await fresh.readJson('orders/pay_one.json')).toEqual({ status: 'PAID' });
+    expect(() => fresh.listJsonPaths('../')).toThrow(TypeError);
+    expect(() => fresh.listJsonPaths('orders')).toThrow(TypeError);
+    github.truncated = true;
+    await expect(store.openSnapshot()).rejects.toMatchObject({ code: 'TRUNCATED_GIT_TREE' });
+  });
+
+  it('refuses oversized report listings instead of silently truncating history', async () => {
+    const github = new FakeGitHub(Object.fromEntries(Array.from({ length: 20_001 }, (_, n) => [`orders/pay_${String(n).padStart(5, '0')}.json`, {}])));
+    const snapshot = await github.store().openSnapshot();
+    expect(() => snapshot.listJsonPaths('orders/')).toThrow(expect.objectContaining({ code: 'REPORTING_CAPACITY' }));
+  });
+
   it('atomically commits order, idempotency index, and work queue in one branch update', async () => {
     const github = new FakeGitHub();
     const result = await github.store().transaction(async tx => {

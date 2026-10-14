@@ -58,6 +58,20 @@ npx wrangler secret bulk secrets/admin-worker-secrets.json
 
 部署时保留 `wrangler.jsonc` 中登录、接入 API 和支付 API 的限流绑定。它们限制请求频率，不提供持久订单数据库；GitHub 配额仍需按实际流量评估。管理写入使用同源 Origin 与 CSRF 验证，短期授权限制为一个平台及允许域名，不授予全局账号或商户凭据。
 
+## 营业额报表与旧账索引补建
+
+报表使用现有私有 GitHub 数据仓库，不增加 D1、KV、R2 或其它数据库，也不需要新 Secret。新订单、付款/关闭状态及通知送达时，源订单和报表索引在同一事务更新。发布后先在后台检查覆盖提示，旧订单未完成补建前只能把金额和列表视为部分数据。
+
+管理员登录后可读取 `GET /api/admin/reports/summary?month=YYYY-MM`，按需附 `clientId`；订单记录为 `GET /api/admin/reports/orders`，支持 `month`、`clientId`、`status`、`limit`、`cursor`。这里仅报表白名单接口接受这些查询参数，产品支付 API 与临时接入 API 仍不接受 query。每页最多 25 笔，按创建时间倒序；最多扫描 40 个索引，短页/空页有 `nextCursor` 时仍需继续。
+
+补建通过已登录后台或 `POST /api/admin/reports/rebuild` 执行，需同源 Origin、管理员 Cookie 和有效 CSRF。JSON 参数 `{limit?,cursor?}`，`limit` 为 1–5，默认 5。保存响应 `nextCursor` 并分批续接，直到 `coverage.complete=true`；无须让浏览器持续运行无限循环，也不要为补建改动付款总开关。补建可以安全重复，不执行支付宝交易、不改变订单或权益、不补发原先不存在的付款事件。若存在未索引记录但游标走到末尾，后续调用会重新定位遗漏记录。
+
+`coverage.scope=ledger` 检查同仓整个账本，`missingOrders>0` 时不要把“全历史”数字当成完整总额。统计使用订单快照的整数分金额；当月成交、支付笔数、通知待送达及日趋势按上海时间的付款确认月份，待付款/已关闭按创建月份的当前状态。列表月份筛选创建月。超时而未获关闭确认仍记待付款。营业额不等于支付宝净结算或退款后净收入，通知送达也不能代替产品实际开通验收；`sandbox` 金额不计入 `live`。
+
+容量上限沿用每 JSON 256 KiB、每事务 64 文件/1 MiB；报表每个目录前缀最多 20,000 个 JSON。月统计最多 31 个日项，全历史统计是常量字段计数，订单索引按单笔分桶。遇到 `REPORTING_CAPACITY` 或 `TRUNCATED_GIT_TREE` 应停止补建并安排归档/容量评估，不能删旧账、忽略错误或将部分结果标记为完整。GitHub 配额、并发重试和 Worker 子请求限制也会影响批量操作；短暂失败可用原游标重试。
+
+报表索引与订单/outbox 一样保存在私有 GitHub，未使用注册表加密；只有 `system/clients.enc.json` 中的平台、授权、计划和审计属于 AES-256-GCM 加密范围。
+
 ## 验证与启用
 
 ```sh

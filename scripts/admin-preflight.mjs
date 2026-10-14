@@ -37,13 +37,19 @@ try {
     if(!response.ok) {let code;try{code=JSON.parse(text)?.error?.code;}catch{}diagnostics[key]={status:response.status,...(typeof code==='string' && /^[A-Z_]{1,80}$/.test(code)?{code}:{})};}
     checks[`${key}Readable`]=response.status===200 && !text.includes(input.password) && !text.includes('apiSecret') && !text.includes('webhookSecret') && !text.includes('tokenHash');
   }
+  const month=new Date(Date.now()+8*3600000).toISOString().slice(0,7);
+  for(const [label,path] of [['summary',`/api/admin/reports/summary?month=${month}`],['orders',`/api/admin/reports/orders?month=${month}&limit=20`]]) {
+    const response=await call(path,{headers});const data=await response.json();
+    checks[`${label}Readable`]=response.status===200 && data.mode==='live' && typeof data.coverage?.complete==='boolean';
+    if(!response.ok)diagnostics[label]={status:response.status,code:typeof data.error?.code==='string'?data.error.code:'UNKNOWN'};
+  }
   const zip=await call('/api/admin/skill.zip',{headers});
   const bytes=new Uint8Array(await zip.arrayBuffer());
   checks.authenticatedSkill=zip.status===200 && bytes[0]===80 && bytes[1]===75 && bytes[2]===3 && bytes[3]===4;
   checks.skillHasNoPassword=!new TextDecoder().decode(bytes).includes(input.password);
   const health=await call('/api/health');
   const status=await health.json();
-  checks.paymentSwitchOff=health.status===200 && status.version==='0.2.0' && status.acceptingPayments===false;
+  checks.paymentSwitchOff=health.status===200 && status.version==='0.3.0' && status.acceptingPayments===false;
   const logout=await call('/api/admin/logout',{method:'POST',headers:{...headers,Origin:base.origin,'X-CSRF-Token':identity.csrfToken}});
   checks.logout=logout.status===200 && logout.headers.get('Set-Cookie')?.includes('Max-Age=0');
   await logout.body?.cancel();

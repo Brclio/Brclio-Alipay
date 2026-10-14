@@ -12,6 +12,15 @@
     'skuRows', 'addSkuButton', 'clientEnabled', 'previewButton', 'editMessage', 'conflictNotice',
     'reloadCurrentButton', 'diffPanel', 'diffTarget', 'diffList', 'saveClientButton', 'cancelPreviewButton',
     'reloadGrantsButton', 'grantsMessage', 'grantsEmpty', 'grantsList',
+    'pageTitle', 'pageSubtitle', 'overviewPage', 'ordersPage', 'productsPage', 'aiPage', 'platformsPage',
+    'coverageNotice', 'coverageText', 'rebuildButton', 'summaryFilters', 'summaryMonth', 'summaryClient',
+    'refreshSummaryButton', 'summaryMessage', 'reportMode', 'metricRevenue', 'metricPaid', 'metricPending',
+    'metricClosed', 'metricDelivery', 'metricAllTime', 'metricAllTimeCount', 'trendSummary', 'revenueChart',
+    'orderFilters', 'ordersMonth', 'ordersClient', 'ordersStatus', 'searchOrdersButton', 'exportOrdersButton',
+    'ordersMessage', 'ordersRows', 'ordersEmpty', 'previousOrdersButton', 'nextOrdersButton', 'ordersPageLabel',
+    'orderDetails', 'orderDetailFields', 'closeOrderDetailsButton', 'productClient', 'productsEmpty',
+    'productAiButton', 'productEditorHost', 'platformEditorHost', 'grantDomainMode', 'grantPricingMode',
+    'grantOriginsLabel', 'grantOriginsHint', 'grantPricingHint', 'reloadAuditButton', 'auditMessage', 'auditEmpty', 'auditList',
   ];
   const ui = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
   let session = null;
@@ -24,6 +33,23 @@
   let outputTimer = null;
   let outputKind = null;
   let outputGrantId = null;
+  let activePage = 'overview';
+  let editingProducts = false;
+  let summaryLoaded = false;
+  let ordersLoaded = false;
+  let auditLoaded = false;
+  let currentCoverage = null;
+  let rebuildCursor = null;
+  let orderItems = [];
+  let orderNextCursor = null;
+  let orderCursors = [null];
+  let orderPageIndex = 0;
+  let loadedOrderFilters = null;
+  const pageTitles = {
+    overview: ['经营概览', '从已确认付款，了解每个产品的成交。'], orders: ['订单记录', '核对支付与产品通知，查看每一笔订单。'],
+    products: ['商品与价格', '调整价格、销售状态和权益说明。'], ai: ['AI 接入', '复制完整任务，让 AI 对接产品与支付中心。'],
+    platforms: ['平台与授权', '管理回调、返回域名和单平台短期授权。'],
+  };
 
   class ApiError extends Error {
     constructor(status, code, message) {
@@ -54,6 +80,11 @@
     ui.loginForm.setAttribute('aria-busy', String(busy));
     ui.grantForm.setAttribute('aria-busy', String(busy));
     ui.clientForm.setAttribute('aria-busy', String(busy));
+    ui.exportOrdersButton.disabled = busy || orderItems.length === 0;
+    ui.previousOrdersButton.disabled = busy || orderPageIndex === 0;
+    ui.nextOrdersButton.disabled = busy || !orderNextCursor;
+    ui.productAiButton.disabled = busy || !clients.some((client) => client.id === ui.productClient.value);
+    ui.rebuildButton.disabled = busy || !currentCoverage || currentCoverage.complete;
   }
   async function operation(button, progressText, action) {
     if (busy) return;
@@ -116,6 +147,13 @@
     resetGrant();
     resetEditor();
     ui.clientsList.replaceChildren();
+    summaryLoaded = false; ordersLoaded = false; auditLoaded = false; currentCoverage = null; rebuildCursor = null;
+    orderItems = []; orderNextCursor = null; orderCursors = [null]; orderPageIndex = 0; loadedOrderFilters = null;
+    ui.auditList.replaceChildren(); ui.auditEmpty.hidden = false; message(ui.auditMessage, '');
+    ui.ordersRows.replaceChildren(); ui.orderDetailFields.replaceChildren(); ui.orderDetails.hidden = true;
+    ui.revenueChart.replaceChildren(); ui.coverageNotice.hidden = true;
+    renderClientSelectors();
+    for (const id of ['metricRevenue', 'metricPaid', 'metricPending', 'metricClosed', 'metricDelivery', 'metricAllTime']) ui[id].textContent = '—';
     ui.grantsList.replaceChildren();
     ui.grantsEmpty.textContent = '正在读取授权…';
     ui.grantsEmpty.hidden = false;
@@ -142,7 +180,7 @@
     ui.loginPassword.value = '';
     message(ui.loginMessage, '');
     message(ui.globalMessage, '');
-    document.title = '接入管理 · Brclio Pay';
+    activatePage(location.hash.slice(1), false);
   }
 
   function publicClient(value) {
@@ -155,7 +193,9 @@
     const skus = Object.create(null);
     for (const [code, sku] of Object.entries(value.skus)) {
       if (typeof sku?.subject !== 'string' || typeof sku.amount !== 'string') throw new ApiError(502, 'INVALID_CLIENT', '商品配置暂时无法读取。');
-      skus[code] = { subject: sku.subject, amount: sku.amount };
+      skus[code] = { subject: sku.subject, amount: sku.amount, enabled: sku.enabled !== false,
+        ...(typeof sku.description === 'string' ? { description: sku.description } : {}),
+        ...(typeof sku.entitlement === 'string' ? { entitlement: sku.entitlement } : {}) };
     }
     return { id: value.id, name: value.name, webhookUrl: value.webhookUrl,
       returnOrigins: value.returnOrigins.filter((origin) => typeof origin === 'string'),
@@ -171,6 +211,7 @@
     renderClients();
     ui.clientsLoading.hidden = true;
     try { await loadGrants(); } catch (error) { report(error, ui.grantsMessage); }
+    await loadActiveReport();
   }
   async function loadGrants() {
     const result = await request('/grants');
@@ -181,6 +222,7 @@
         || !Number.isFinite(Date.parse(value.expiresAt))) throw new ApiError(502, 'INVALID_GRANTS', '短期授权信息不完整，请刷新。');
       return { id: value.id, clientId: value.clientId, mode: value.mode,
         allowedOrigins: value.allowedOrigins.filter((origin) => typeof origin === 'string'),
+        domainMode: value.domainMode === 'auto' ? 'auto' : 'fixed', pricingMode: value.pricingMode === 'manual' ? 'manual' : 'detect',
         expiresAt: value.expiresAt, revokedAt: typeof value.revokedAt === 'string' ? value.revokedAt : null };
     });
     const rows = grants.map((grant) => {
@@ -191,7 +233,8 @@
       heading.append(element('strong', '', grant.clientId), element('span', `admin-badge${active ? '' : ' disabled'}`, grant.revokedAt ? '已撤销' : active ? '有效' : '已到期'));
       content.append(heading,
         element('p', 'grant-row-meta', `${grant.mode === 'create' ? '新建平台' : '更新平台'} · 有效至 ${timeLabel(new Date(grant.expiresAt))}（北京时间）`),
-        element('p', 'grant-row-meta', `授权来源 · ${grant.allowedOrigins.join('、')}`));
+        element('p', 'grant-row-meta', `${grant.domainMode === 'auto' ? 'AI 可添加项目所需来源' : '固定来源'} · ${grant.pricingMode === 'manual' ? '人工提供套餐' : 'AI 读取现有套餐'}`),
+        element('p', 'grant-row-meta', `已纳入来源 · ${grant.allowedOrigins.length ? grant.allowedOrigins.join('、') : '等待 AI 识别项目域名'}`));
       row.append(content);
       if (active) {
         const revoke = element('button', 'admin-text-button revoke-grant-button', '撤销授权');
@@ -202,7 +245,7 @@
             try {
               await request(`/grants/${encodeURIComponent(grant.id)}/revoke`, { method: 'POST' });
               if (grant.id === outputGrantId) clearOutput();
-              await loadGrants();
+              auditLoaded = false; await loadGrants();
               message(ui.grantsMessage, `已撤销 ${grant.clientId} 的这次授权。对应 AI 任务不能继续使用。`, 'success');
             } catch (error) { report(error, ui.grantsMessage); }
           });
@@ -231,6 +274,7 @@
       grant.type = 'button'; grant.setAttribute('data-busy-lock', '');
       grant.setAttribute('aria-label', `复制 ${client.name} 的 AI 更新任务`);
       grant.addEventListener('click', () => {
+        activatePage('ai');
         selectGrantClient(client);
         void generateGrant(grant);
       });
@@ -238,16 +282,21 @@
       edit.type = 'button'; edit.setAttribute('data-busy-lock', '');
       edit.setAttribute('aria-label', `编辑 ${client.name} 的配置`);
       edit.addEventListener('click', () => openEditor(client));
-      actions.append(grant, edit); article.append(content, actions); return article;
+      const products = element('button', 'admin-text-button', '管理商品与价格');
+      products.type = 'button'; products.setAttribute('data-busy-lock', '');
+      products.addEventListener('click', () => { ui.productClient.value = client.id; openEditor(client, true); });
+      actions.append(grant, products, edit); article.append(content, actions); return article;
     });
     ui.clientsList.replaceChildren(...rows);
     ui.clientCount.textContent = String(clients.length);
     ui.clientsEmpty.hidden = clients.length > 0;
+    renderClientSelectors();
     syncControls();
   }
 
-  function originsFromText(value) {
+  function originsFromText(value, optional = false) {
     const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length && optional) return [];
     if (!lines.length) throw new InputError('请填写至少一个你控制的 HTTPS 来源。');
     const origins = lines.map((line) => {
       if (line.length > 300) throw new InputError('单个来源不能超过 300 个字符。');
@@ -283,6 +332,7 @@
     ui.grantModeLabel.textContent = '新建平台任务';
     ui.grantModeLabel.classList.remove('update-mode');
     ui.resetGrantButton.hidden = true;
+    syncGrantModes();
     message(ui.grantMessage, '');
   }
   function selectGrantClient(client) {
@@ -336,18 +386,22 @@
         message(ui.grantMessage, '');
         clearOutput();
         const clientId = validId(ui.grantClientId.value.trim());
-        const allowedOrigins = originsFromText(ui.grantOrigins.value);
+        const domainMode = ui.grantDomainMode.value;
+        const pricingMode = ui.grantPricingMode.value;
+        const allowedOrigins = originsFromText(ui.grantOrigins.value, domainMode === 'auto');
         if (grantMode === 'create' && clients.some((client) => client.id === clientId)) throw new InputError('此平台标识已经存在，请从平台列表生成它的更新任务。');
-        const result = await request('/grants', { method: 'POST', body: { clientId, mode: grantMode, allowedOrigins } });
+        const result = await request('/grants', { method: 'POST', body: { clientId, mode: grantMode, allowedOrigins, domainMode, pricingMode } });
         if (typeof result.prompt !== 'string' || !result.prompt || !Number.isFinite(Date.parse(result.expiresAt))) {
           throw new ApiError(502, 'INVALID_GRANT', '任务结果不完整，请重新生成。');
         }
+        activatePage('ai');
         setOutput(result.prompt, {
           title: grantMode === 'create' ? 'AI 平台接入任务' : 'AI 平台更新任务', kind: 'grant', expiresAt: result.expiresAt, grantId: result.grantId,
           meta: `平台 ${clientId} · ${grantMode === 'create' ? '仅创建此平台' : '仅更新此平台'} · 授权至 ${timeLabel(new Date(result.expiresAt))}（北京时间）`,
         });
         const copied = await copyOutput();
         message(ui.grantMessage, copied ? '任务已生成并复制。短期权限仅适用于所选平台。' : '任务已生成，请在下方复制完整内容。', 'success');
+        auditLoaded = false;
         try { await loadGrants(); } catch (error) { report(error, ui.grantsMessage); }
       } catch (error) { report(error, ui.grantMessage); }
     });
@@ -359,22 +413,37 @@
     syncControls();
   }
   function addSku(code = '', value = { subject: '', amount: '' }) {
-    const row = element('div', 'sku-row');
+    const row = element('div', 'sku-row sku-card');
+    const existing = !!editingClient && Object.hasOwn(editingClient.skus, code);
     for (const [field, label, current] of [['code', '商品代码', code], ['subject', '商品名称', value.subject], ['amount', '价格（元）', value.amount]]) {
-      const wrapper = element('label', '');
+      const wrapper = element('label', `sku-field sku-${field}`);
       wrapper.append(element('span', 'sku-mobile-label', label));
       const input = element('input', 'admin-input');
       input.type = 'text'; input.required = true; input.value = current;
       input.dataset.field = field; input.setAttribute('data-busy-lock', ''); input.setAttribute('aria-label', label);
       input.maxLength = field === 'subject' ? 120 : field === 'code' ? 80 : 9;
       if (field === 'amount') input.inputMode = 'decimal';
-      if (field === 'code') { input.autocomplete = 'off'; input.spellcheck = false; }
+      if (field === 'code') { input.autocomplete = 'off'; input.spellcheck = false; input.readOnly = existing; }
       wrapper.append(input); row.append(wrapper);
     }
-    const remove = element('button', 'remove-sku', '×');
-    remove.type = 'button'; remove.setAttribute('aria-label', '移除此商品'); remove.setAttribute('data-busy-lock', '');
-    remove.addEventListener('click', () => { row.remove(); invalidatePreview(); });
-    row.append(remove); ui.skuRows.append(row); syncControls();
+    for (const [field, label, limit] of [['description', '商品简介（可选）', 500], ['entitlement', '购买权益 / 有效期说明（可选）', 1000]]) {
+      const wrapper = element('label', `sku-field sku-${field}`);
+      wrapper.append(element('span', 'sku-mobile-label', label));
+      const input = element('textarea', 'admin-input'); input.rows = 2; input.maxLength = limit;
+      input.value = value[field] || ''; input.dataset.field = field; input.setAttribute('aria-label', label); input.setAttribute('data-busy-lock', '');
+      wrapper.append(input); row.append(wrapper);
+    }
+    const sale = element('label', 'sku-sale');
+    const enabled = element('input', ''); enabled.type = 'checkbox'; enabled.checked = value.enabled !== false;
+    enabled.dataset.field = 'enabled'; enabled.setAttribute('data-busy-lock', '');
+    sale.append(enabled, element('span', '', '在售 · 允许新建此商品订单'));
+    const remove = element('button', 'admin-text-button remove-sku', existing ? '停售商品' : '移除新商品');
+    remove.type = 'button'; remove.setAttribute('data-busy-lock', '');
+    function syncSale() { row.classList.toggle('sku-stopped', !enabled.checked); if (existing) remove.textContent = enabled.checked ? '停售商品' : '恢复在售'; }
+    enabled.addEventListener('change', syncSale);
+    remove.addEventListener('click', () => { if (existing) { enabled.checked = !enabled.checked; syncSale(); } else row.remove(); invalidatePreview(); });
+    const footer = element('div', 'sku-footer'); footer.append(sale, remove); row.append(footer);
+    ui.skuRows.append(row); syncSale(); syncControls();
   }
   function resetEditor() {
     editingClient = null;
@@ -388,8 +457,12 @@
     message(ui.editMessage, '');
     invalidatePreview();
   }
-  function openEditor(client) {
+  function openEditor(client, products = false) {
     resetEditor();
+    editingProducts = products;
+    ui.manualSection.classList.toggle('products-mode', products);
+    (products ? ui.productEditorHost : ui.platformEditorHost).append(ui.manualSection);
+    activatePage(products ? 'products' : 'platforms');
     editingClient = client;
     ui.clientId.value = client.id; ui.clientId.readOnly = true;
     ui.clientName.value = client.name; ui.webhookUrl.value = client.webhookUrl;
@@ -397,7 +470,7 @@
     ui.skuRows.replaceChildren();
     Object.entries(client.skus).forEach(([code, sku]) => addSku(code, sku));
     if (!Object.keys(client.skus).length) addSku();
-    ui.manualTitle.textContent = `编辑平台 · ${client.name}`;
+    ui.manualTitle.textContent = products ? `商品与价格 · ${client.name}` : `编辑平台 · ${client.name}`;
     ui.editContext.textContent = `正在编辑 ${client.id}。平台标识固定，保存时校验当前版本。`;
     ui.manualSection.open = true;
     ui.manualSection.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
@@ -426,12 +499,16 @@
       if (!subject) throw new InputError(`请填写商品 ${code} 的名称。`);
       if (!/^(?:0|[1-9]\d{0,5})(?:\.\d{1,2})?$/.test(amount) || Number(amount) <= 0) throw new InputError(`商品 ${code} 的价格应大于 0，最高 999999.99 元，最多保留两位小数。`);
       const [whole, fraction = ''] = amount.split('.');
-      skus[code] = { subject, amount: `${whole}.${fraction.padEnd(2, '0')}` };
+      const description = row.querySelector('[data-field="description"]').value.trim();
+      const entitlement = row.querySelector('[data-field="entitlement"]').value.trim();
+      if (description.length > 500 || entitlement.length > 1000) throw new InputError(`商品 ${code} 的简介或权益说明超出长度限制。`);
+      skus[code] = { subject, amount: `${whole}.${fraction.padEnd(2, '0')}`, enabled: row.querySelector('[data-field="enabled"]').checked,
+        ...(description ? { description } : {}), ...(entitlement ? { entitlement } : {}) };
     }
     return { id, name, webhookUrl: webhook.href, returnOrigins, skus, enabled: ui.clientEnabled.checked };
   }
   function skuSummary(skus) {
-    return Object.entries(skus).sort(([a], [b]) => a.localeCompare(b)).map(([code, sku]) => `${code} · ${sku.subject} · ¥${sku.amount}`).join('\n');
+    return Object.entries(skus).sort(([a], [b]) => a.localeCompare(b)).map(([code, sku]) => `${code} · ${sku.subject} · ¥${sku.amount} · ${sku.enabled !== false ? '在售' : '停售'}${sku.description ? `\n简介：${sku.description}` : ''}${sku.entitlement ? `\n权益：${sku.entitlement}` : ''}`).join('\n');
   }
   function changesFor(config) {
     const before = editingClient;
@@ -461,6 +538,195 @@
       ui.diffPanel.hidden = false; syncControls();
       ui.diffPanel.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
     } catch (error) { invalidatePreview(); report(error, ui.editMessage); }
+  }
+
+  function activatePage(name, updateHash = true) {
+    activePage = Object.hasOwn(pageTitles, name) ? name : 'overview';
+    document.querySelectorAll('[data-admin-page]').forEach((page) => { page.hidden = page.dataset.adminPage !== activePage; });
+    document.querySelectorAll('[data-page-link]').forEach((link) => {
+      if (link.dataset.pageLink === activePage) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+    });
+    ui.pageTitle.textContent = pageTitles[activePage][0];
+    ui.pageSubtitle.textContent = pageTitles[activePage][1];
+    if (session) document.title = `${pageTitles[activePage][0]} · Brclio Pay`;
+    if (updateHash && location.hash !== `#${activePage}`) history.replaceState(null, '', `#${activePage}`);
+    ui.coverageNotice.hidden = !currentCoverage || currentCoverage.complete || !['overview', 'orders'].includes(activePage);
+  }
+  async function loadActiveReport() {
+    if (activePage === 'overview' && !summaryLoaded) await loadSummary();
+    if (activePage === 'orders' && !ordersLoaded) await loadOrders(true);
+    if (activePage === 'platforms' && !auditLoaded) await loadAudit();
+  }
+  async function loadAudit() {
+    message(ui.auditMessage, '正在读取操作记录…');
+    try {
+      const result = await request('/audit');
+      if (!Array.isArray(result.entries)) throw new ApiError(502, 'INVALID_AUDIT', '操作记录暂时无法读取。');
+      const actions = { 'client.created': '注册平台', 'client.updated': '更新平台配置', 'grant.created': '生成短期授权',
+        'grant.revoked': '撤销短期授权', 'integration.planned': 'AI 生成变更计划（尚未应用）', 'integration.applied': 'AI 应用平台配置' };
+      const entries = result.entries.filter((entry) => entry && typeof entry.clientId === 'string' && typeof entry.at === 'string' && Object.hasOwn(actions, entry.action)).slice(-20).reverse();
+      ui.auditList.replaceChildren(...entries.map((entry) => {
+        const row = element('article', 'audit-row'), heading = element('div', 'audit-row-heading');
+        heading.append(element('strong', '', actions[entry.action]), element('span', 'client-id', entry.clientId), element('time', '', orderTime(entry.at)));
+        row.append(heading);
+        const origins = Array.isArray(entry.addedOrigins) ? entry.addedOrigins.filter((origin) => typeof origin === 'string') : [];
+        if (origins.length) row.append(element('p', 'audit-origins', `${entry.action === 'integration.applied' ? '实际新增来源' : '计划新增来源'} · ${origins.join('、')}`));
+        return row;
+      }));
+      ui.auditEmpty.hidden = entries.length > 0;
+      ui.auditEmpty.textContent = '目前没有操作记录。'; auditLoaded = true; message(ui.auditMessage, '');
+    } catch (error) { report(error, ui.auditMessage); }
+  }
+  function renderClientSelectors() {
+    for (const [select, emptyLabel] of [[ui.summaryClient, '全部平台'], [ui.ordersClient, '全部平台'], [ui.productClient, '请选择平台']]) {
+      const selected = select.value;
+      const first = element('option', '', emptyLabel); first.value = '';
+      const options = clients.map((client) => { const option = element('option', '', `${client.name} · ${client.id}`); option.value = client.id; return option; });
+      select.replaceChildren(first, ...options);
+      select.value = clients.some((client) => client.id === selected) ? selected : '';
+    }
+    ui.productsEmpty.hidden = clients.length > 0;
+  }
+  function syncGrantModes() {
+    const automatic = ui.grantDomainMode.value === 'auto';
+    ui.grantOrigins.required = !automatic;
+    ui.grantOriginsLabel.textContent = automatic ? '已知 HTTPS 来源（可选）' : '允许 AI 配置的 HTTPS 来源';
+    ui.grantOriginsHint.textContent = automatic
+      ? 'AI 可在这次单平台授权有效期内添加项目所需的公网 HTTPS 来源。已知域名可先填入，新增来源会在后台记录；平台配置仍只影响这个产品。'
+      : 'AI 只能使用这些来源。每行填写一个你控制的 HTTPS 来源；https://*.brclio.com 可授权子域名，不包含主域名。';
+    ui.grantPricingHint.textContent = ui.grantPricingMode.value === 'detect'
+      ? 'AI 先读取项目现有商品、套餐、费用及权益；遇到相互矛盾或缺失的定价信息，再向你确认，不会编造价格。'
+      : '把生成的任务交给项目 AI 时，同时提供商品名称、SKU、价格、购买权益和有效期；AI 会与现有实现核对后接入。';
+  }
+  function money(value) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new ApiError(502, 'INVALID_REPORT', '统计金额暂时无法读取，请刷新重试。');
+    return `¥${new Intl.NumberFormat('zh-CN').format(Math.floor(value / 100))}.${String(value % 100).padStart(2, '0')}`;
+  }
+  function count(value) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new ApiError(502, 'INVALID_REPORT', '统计笔数暂时无法读取，请刷新重试。');
+    return new Intl.NumberFormat('zh-CN').format(value);
+  }
+  function setCoverage(value) {
+    if (!value || typeof value.complete !== 'boolean' || !Number.isSafeInteger(value.sourceOrders) || !Number.isSafeInteger(value.indexedOrders) || !Number.isSafeInteger(value.missingOrders)) throw new ApiError(502, 'INVALID_REPORT', '统计覆盖信息暂时无法读取。');
+    currentCoverage = value;
+    ui.coverageText.textContent = `账本共 ${count(value.sourceOrders)} 笔，已索引 ${count(value.indexedOrders)} 笔，待补建 ${count(value.missingOrders)} 笔。补建完成前，以下统计和列表可能不完整。`;
+    ui.coverageNotice.hidden = value.complete || !['overview', 'orders'].includes(activePage);
+    if (value.complete) rebuildCursor = null;
+    syncControls();
+  }
+  function validMonth(value, optional = false) {
+    if (!value && optional) return '';
+    if (!/^[2-9]\d{3}-(?:0[1-9]|1[0-2])$/.test(value)) throw new InputError('请选择 YYYY-MM 格式的月份。');
+    return value;
+  }
+  function svgElement(tag, attributes = {}, text) {
+    const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function renderTrend(daily, complete) {
+    if (!Array.isArray(daily) || daily.length > 31) throw new ApiError(502, 'INVALID_REPORT', '每日统计暂时无法读取。');
+    const max = Math.max(0, ...daily.map((day) => { money(day.paidAmountCents); count(day.paidCount); return day.paidAmountCents; }));
+    const svg = svgElement('svg', { viewBox: '0 0 820 230', role: 'group', 'aria-label': '每天的成交金额与笔数' });
+    svg.append(svgElement('line', { x1: 64, y1: 188, x2: 804, y2: 188, class: 'chart-baseline' }),
+      svgElement('text', { x: 54, y: 191, 'text-anchor': 'end', class: 'chart-label' }, '0'),
+      svgElement('text', { x: 54, y: 25, 'text-anchor': 'end', class: 'chart-label' }, max ? money(max).slice(1) : '0'));
+    daily.forEach((day, index) => {
+      const step = 740 / Math.max(1, daily.length), height = max ? day.paidAmountCents / max * 160 : 0;
+      const x = 64 + step * index + step * 0.2;
+      const detail = `${day.date}，成交 ${money(day.paidAmountCents)}，${count(day.paidCount)} 笔`;
+      const group = svgElement('g', { tabindex: 0, role: 'img', 'aria-label': detail, class: 'chart-day' });
+      group.append(svgElement('title', {}, detail), svgElement('rect', { x, y: 188 - height, width: step * 0.6, height, rx: 2, class: 'chart-bar' }),
+        svgElement('rect', { x: 64 + step * index, y: 22, width: step, height: 166, class: 'chart-hit' }));
+      if (index === 0 || (index + 1) % 5 === 0 || index === daily.length - 1) svg.append(svgElement('text', { x: x + step * 0.3, y: 213, 'text-anchor': 'middle', class: 'chart-label' }, String(index + 1)));
+      svg.append(group);
+    });
+    ui.revenueChart.replaceChildren(svg);
+    ui.revenueChart.setAttribute('aria-label', max ? `每日成交金额，最高 ${money(max)}。每个日期可聚焦查看。${complete ? '' : '当前仅包含已索引记录。'}` : complete ? '当月每日成交金额均为零。' : '已索引记录暂无成交金额，统计尚未完整。');
+    ui.trendSummary.textContent = max ? `${ui.summaryMonth.value} · 按付款确认日期统计${complete ? '' : ' · 统计尚未完整'}` : complete ? '当月还没有已确认付款，实际营业额为 ¥0.00。' : '当前已索引记录暂无已确认付款，补建完成后再确认总额。';
+  }
+  function clearSummaryView() {
+    for (const id of ['metricRevenue', 'metricPaid', 'metricPending', 'metricClosed', 'metricDelivery', 'metricAllTime']) ui[id].textContent = '—';
+    ui.metricAllTimeCount.textContent = '所有已确认付款'; ui.revenueChart.replaceChildren();
+    ui.trendSummary.textContent = '请选择筛选条件后查看统计。'; ui.reportMode.textContent = '尚未读取'; summaryLoaded = false;
+  }
+  async function loadSummary() {
+    clearSummaryView();
+    message(ui.summaryMessage, '正在读取经营数据…');
+    try {
+      const month = validMonth(ui.summaryMonth.value), query = new URLSearchParams({ month });
+      if (ui.summaryClient.value) query.set('clientId', ui.summaryClient.value);
+      const result = await request(`/reports/summary?${query}`);
+      if (!['live', 'sandbox'].includes(result.mode) || !result.allTime) throw new ApiError(502, 'INVALID_REPORT', '经营数据暂时无法读取。');
+      ui.metricRevenue.textContent = money(result.paidAmountCents);
+      ui.metricPaid.textContent = count(result.paidCount); ui.metricPending.textContent = count(result.pendingCount);
+      ui.metricClosed.textContent = count(result.closedCount); ui.metricDelivery.textContent = count(result.deliveryPendingCount);
+      ui.metricAllTime.textContent = money(result.allTime.paidAmountCents); ui.metricAllTimeCount.textContent = `${count(result.allTime.paidCount)} 笔 · 当前平台筛选范围`;
+      ui.reportMode.textContent = result.mode === 'live' ? '正式账本 / CNY' : '沙箱账本 / CNY';
+      setCoverage(result.coverage); renderTrend(result.daily, result.coverage.complete); summaryLoaded = true; message(ui.summaryMessage, '');
+    } catch (error) { report(error, ui.summaryMessage); }
+  }
+  function orderTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? `${date.getFullYear() > 0 ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date) : '—'}` : '—';
+  }
+  function statusLabel(status) { return { PAID: '已付款', PENDING: '待付款', CLOSED: '已关闭' }[status] || '未知状态'; }
+  function openOrderDetails(order) {
+    const fields = [['支付订单号', order.id], ['产品订单号', order.productOrderId], ['平台', order.clientId], ['商品代码', order.sku], ['商品', order.subject],
+      ['订单金额', money(order.amountCents)], ['订单状态', statusLabel(order.status)], ['产品通知', order.status !== 'PAID' ? '尚未付款' : order.fulfillmentStatus === 'delivered' ? '已送达' : '待送达'],
+      ['创建时间', orderTime(order.createdAt)], ['到期时间', orderTime(order.expiresAt)], ['付款时间', orderTime(order.paidAt)], ['支付宝交易号', order.tradeNo || '—'], ['账本', order.mode === 'live' ? '正式' : '沙箱']];
+    ui.orderDetailFields.replaceChildren(...fields.map(([label, value]) => { const row = element('div', ''); row.append(element('dt', '', label), element('dd', '', value)); return row; }));
+    ui.orderDetails.hidden = false;
+    ui.orderDetails.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
+  }
+  function renderOrders() {
+    ui.ordersRows.replaceChildren(...orderItems.map((order) => {
+      const row = element('tr', '');
+      const identity = element('td', 'order-identity'); identity.append(element('strong', '', order.subject), element('span', '', order.id), element('span', '', `产品单号 ${order.productOrderId}`));
+      const platform = element('td', ''); platform.append(element('span', '', clients.find((client) => client.id === order.clientId)?.name || order.clientId), element('small', '', order.clientId));
+      const amount = element('td', 'order-amount', money(order.amountCents));
+      const status = element('td', ''); status.append(element('span', `admin-badge ${order.status === 'PAID' ? 'paid-status' : ''}`, statusLabel(order.status)), element('small', '', order.status !== 'PAID' ? '尚未付款' : order.fulfillmentStatus === 'delivered' ? '通知已送达' : '通知待送达'));
+      const dates = element('td', 'order-dates'); dates.append(element('span', '', `创建 ${orderTime(order.createdAt)}`), element('small', '', order.paidAt ? `付款 ${orderTime(order.paidAt)}` : '北京时间'));
+      const detail = element('td', ''); const button = element('button', 'admin-text-button', '查看'); button.type = 'button'; button.addEventListener('click', () => openOrderDetails(order)); detail.append(button);
+      row.append(identity, platform, amount, status, dates, detail); return row;
+    }));
+    ui.ordersEmpty.hidden = orderItems.length !== 0;
+    ui.ordersEmpty.textContent = orderNextCursor ? '本批扫描未找到匹配订单，可点击“下一页”继续查看。' : '当前筛选下没有订单。';
+    ui.ordersPageLabel.textContent = `第 ${orderPageIndex + 1} 页 · 本页 ${orderItems.length} 笔`;
+    syncControls();
+  }
+  async function loadOrders(reset = false, targetPage = orderPageIndex) {
+    message(ui.ordersMessage, '正在读取订单…');
+    try {
+      if (reset) {
+        loadedOrderFilters = { month: validMonth(ui.ordersMonth.value, true), clientId: ui.ordersClient.value, status: ui.ordersStatus.value };
+        orderCursors = [null]; targetPage = 0; orderPageIndex = 0; orderItems = []; orderNextCursor = null; renderOrders(); ui.orderDetails.hidden = true;
+      }
+      const query = new URLSearchParams({ limit: '20' });
+      for (const [key, value] of Object.entries(loadedOrderFilters || {})) if (value) query.set(key, value);
+      if (orderCursors[targetPage]) query.set('cursor', orderCursors[targetPage]);
+      const result = await request(`/reports/orders?${query}`);
+      if (!Array.isArray(result.items) || result.items.length > 25 || !(result.nextCursor === null || typeof result.nextCursor === 'string')) throw new ApiError(502, 'INVALID_REPORT', '订单列表暂时无法读取。');
+      for (const order of result.items) { money(order.amountCents); if (!['PENDING', 'PAID', 'CLOSED'].includes(order.status)) throw new ApiError(502, 'INVALID_REPORT', '订单状态暂时无法读取。'); }
+      orderItems = result.items; orderNextCursor = result.nextCursor; orderPageIndex = targetPage; ordersLoaded = true;
+      setCoverage(result.coverage); renderOrders(); ui.orderDetails.hidden = true; message(ui.ordersMessage, '');
+    } catch (error) { report(error, ui.ordersMessage); }
+  }
+  function csvCell(value) {
+    let text = String(value ?? '');
+    if (/^[\s]*[=+\-@\t\r]/.test(text)) text = `'${text}`;
+    return `"${text.replaceAll('"', '""')}"`;
+  }
+  function exportCurrentOrders() {
+    if (!orderItems.length) return;
+    const rows = [['支付订单号', '产品订单号', '平台', '商品代码', '商品', '金额（元）', '状态', '产品通知', '创建时间（北京时间）', '付款时间（北京时间）', '支付宝交易号', '账本'],
+      ...orderItems.map((order) => [order.id, order.productOrderId, order.clientId, order.sku, order.subject, order.amount, statusLabel(order.status), order.fulfillmentStatus, orderTime(order.createdAt), orderTime(order.paidAt), order.tradeNo || '', order.mode])];
+    const blob = new Blob(['\uFEFF' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob), link = element('a', ''); link.href = url; link.download = `brclio-pay-orders-current-page-${orderPageIndex + 1}.csv`;
+    document.body.append(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    message(ui.ordersMessage, `已导出当前第 ${orderPageIndex + 1} 页，共 ${orderItems.length} 笔；不是全量账本导出。`, 'success');
   }
 
   ui.loginForm.addEventListener('submit', (event) => {
@@ -507,7 +773,7 @@
       try { await loadGrants(); } catch (error) { report(error, ui.grantsMessage); }
     });
   });
-  ui.newClientButton.addEventListener('click', resetEditor);
+  ui.newClientButton.addEventListener('click', () => { editingProducts = false; ui.manualSection.classList.remove('products-mode'); ui.platformEditorHost.append(ui.manualSection); resetEditor(); ui.manualSection.open = true; });
   ui.addSkuButton.addEventListener('click', () => { addSku(); invalidatePreview(); });
   ui.clientForm.addEventListener('input', invalidatePreview);
   ui.clientForm.addEventListener('change', invalidatePreview);
@@ -522,8 +788,8 @@
         const saved = publicClient(result.client);
         const existing = clients.findIndex((client) => client.id === saved.id);
         if (existing < 0) clients.push(saved); else clients[existing] = saved;
-        renderClients(); openEditor(saved);
-        message(ui.editMessage, '此平台配置已保存，其它平台保持不变。', 'success');
+        auditLoaded = false; renderClients(); openEditor(saved, editingProducts);
+        message(ui.editMessage, editingProducts ? '商品配置已保存。已接入目录读取的产品会读取新价；权益规则仍需同步产品实现，历史订单保留原金额和权益。' : '此平台配置已保存，其它平台保持不变。', 'success');
       } catch (error) {
         if (error instanceof ApiError && error.status === 409) {
           invalidatePreview(); ui.conflictNotice.hidden = false;
@@ -539,11 +805,51 @@
         await loadClients();
         const latest = clients.find((client) => client.id === id);
         if (!latest) throw new InputError('该平台当前不存在，请重新选择平台或注册新平台。');
-        openEditor(latest); message(ui.editMessage, '已加载最新配置，请重新编辑并预览。');
+        openEditor(latest, editingProducts); message(ui.editMessage, '已加载最新配置，请重新编辑并预览。');
       } catch (error) { ui.clientsLoading.hidden = true; report(error, ui.editMessage); }
     });
   });
 
+  document.querySelectorAll('[data-page-link]').forEach((link) => link.addEventListener('click', (event) => {
+    event.preventDefault(); activatePage(link.dataset.pageLink);
+    if (session) void operation(null, null, loadActiveReport);
+  }));
+  window.addEventListener('hashchange', () => { activatePage(location.hash.slice(1), false); if (session) void operation(null, null, loadActiveReport); });
+  ui.reloadAuditButton.addEventListener('click', () => { void operation(ui.reloadAuditButton, '正在刷新…', loadAudit); });
+  ui.grantDomainMode.addEventListener('change', syncGrantModes); ui.grantPricingMode.addEventListener('change', syncGrantModes);
+  ui.summaryFilters.addEventListener('change', () => { clearSummaryView(); message(ui.summaryMessage, '筛选条件已更改，点击“查看统计”读取对应数据。'); });
+  ui.orderFilters.addEventListener('change', () => {
+    ordersLoaded = false; orderItems = []; orderNextCursor = null; orderCursors = [null]; orderPageIndex = 0; renderOrders(); ui.orderDetails.hidden = true;
+    ui.ordersEmpty.textContent = '筛选条件已更改，点击“查询订单”读取对应记录。'; message(ui.ordersMessage, '筛选条件已更改，之前的订单页已清除。');
+  });
+  ui.summaryFilters.addEventListener('submit', (event) => { event.preventDefault(); if (ui.summaryFilters.reportValidity()) void operation(ui.refreshSummaryButton, '正在读取…', loadSummary); });
+  ui.orderFilters.addEventListener('submit', (event) => { event.preventDefault(); void operation(ui.searchOrdersButton, '正在查询…', () => loadOrders(true)); });
+  ui.nextOrdersButton.addEventListener('click', () => { if (!orderNextCursor) return; orderCursors[orderPageIndex + 1] = orderNextCursor; void operation(ui.nextOrdersButton, '正在读取…', () => loadOrders(false, orderPageIndex + 1)); });
+  ui.previousOrdersButton.addEventListener('click', () => { if (orderPageIndex > 0) void operation(ui.previousOrdersButton, '正在读取…', () => loadOrders(false, orderPageIndex - 1)); });
+  ui.exportOrdersButton.addEventListener('click', exportCurrentOrders);
+  ui.closeOrderDetailsButton.addEventListener('click', () => { ui.orderDetails.hidden = true; });
+  ui.rebuildButton.addEventListener('click', () => {
+    void operation(ui.rebuildButton, '正在补建本批…', async () => {
+      try {
+        const result = await request('/reports/rebuild', { method: 'POST', body: { limit: 5, ...(rebuildCursor ? { cursor: rebuildCursor } : {}) } });
+        rebuildCursor = result.nextCursor; setCoverage(result.coverage);
+        summaryLoaded = false; ordersLoaded = false; await loadActiveReport();
+        message(activePage === 'orders' ? ui.ordersMessage : ui.summaryMessage,
+          `本批已补建 ${count(result.processed)} 笔。${result.coverage.complete ? '历史索引已完整。' : '已暂停；点击“补建下一批”继续。'}`, 'success');
+      } catch (error) { report(error, activePage === 'orders' ? ui.ordersMessage : ui.summaryMessage); }
+    });
+  });
+  ui.productClient.addEventListener('change', () => {
+    const client = clients.find((item) => item.id === ui.productClient.value);
+    if (client) openEditor(client, true); else { ui.platformEditorHost.append(ui.manualSection); resetEditor(); }
+    syncControls();
+  });
+  ui.productAiButton.addEventListener('click', () => { const client = clients.find((item) => item.id === ui.productClient.value); if (!client) return; activatePage('ai'); selectGrantClient(client); void generateGrant(ui.generateGrantButton); });
+
+  const initialMonth = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit' }).format(new Date());
+  ui.summaryMonth.value = initialMonth;
+  ui.ordersMonth.value = initialMonth;
+  syncGrantModes();
   resetEditor();
   void operation(null, null, async () => {
     try {

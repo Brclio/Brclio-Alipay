@@ -28,21 +28,26 @@ export interface PublicAuditEntry {
   id: string; at: string; actor: string;
   action: 'client.created' | 'client.updated' | 'grant.created' | 'grant.revoked' | 'integration.planned' | 'integration.applied';
   clientId: string; version?: string;
+  addedOrigins?: string[];
 }
 export interface GrantInput {
   clientId: string;
   mode: 'create' | 'update';
   allowedOrigins: string[];
+  domainMode?: 'fixed' | 'auto';
+  pricingMode?: 'detect' | 'manual';
   lifetimeSeconds?: number;
 }
 export interface GrantView {
   id: string; clientId: string; mode: 'create' | 'update'; allowedOrigins: string[];
+  domainMode?: 'fixed' | 'auto'; pricingMode?: 'detect' | 'manual';
   createdAt: string; expiresAt: string;
   revokedAt?: string;
 }
 export interface IssuedGrant extends GrantView { token: string }
 export interface IntegrationContext {
   clientId: string; mode: 'create' | 'update'; allowedOrigins: string[]; expiresAt: string;
+  domainMode?: 'fixed' | 'auto'; pricingMode?: 'detect' | 'manual';
   client: ClientView | null; credentials: Credentials | null;
   payBaseUrl: string; docsUrl: string; paymentMode: 'live' | 'sandbox';
 }
@@ -50,6 +55,7 @@ export interface PlanInput { config: ClientConfig; expectedVersion: string }
 export interface PlanView {
   planId: string; clientId: string; mode: 'create' | 'update'; baseVersion: string;
   expiresAt: string; before: ClientView | null; after: ClientConfig & { enabled: boolean };
+  addedOrigins?: string[];
 }
 export interface ApplyResult { client: ClientView; credentials: Credentials; appliedAt: string }
 interface StoredGrant extends GrantView { tokenHash: string; appliedPlanId?: string }
@@ -99,13 +105,13 @@ function origin(value: unknown): string {
     return value;
   }
   const parsed = httpsUrl(value);
-  requireThat(parsed.origin === value && parsed.hostname !== 'localhost' && !parsed.hostname.endsWith('.localhost')
+  requireThat(parsed.origin === value && parsed.hostname.includes('.') && parsed.hostname !== 'localhost' && !parsed.hostname.endsWith('.localhost')
     && !parsed.hostname.endsWith('.local') && !/^[\d.]+$/.test(parsed.hostname) && !parsed.hostname.includes(':'),
   400, 'INVALID_ORIGIN', '白名单必须是公网 HTTPS origin，不能包含路径');
   return value;
 }
-function origins(value: unknown): string[] {
-  requireThat(Array.isArray(value) && value.length > 0 && value.length <= 50, 400, 'INVALID_ORIGIN', '需要 1 至 50 个域名白名单');
+function origins(value: unknown, minimum = 1, maximum = 50): string[] {
+  requireThat(Array.isArray(value) && value.length >= minimum && value.length <= maximum, 400, 'INVALID_ORIGIN', `需要 ${minimum} 至 ${maximum} 个 HTTPS 来源`);
   return [...new Set(value.map(origin))].sort();
 }
 function scopeContains(candidate: string, scope: string): boolean {
@@ -122,6 +128,12 @@ function enforceScope(config: ClientConfig, previous: ManagedClient | null, scop
   const changedOrigins = config.returnOrigins.filter(item => !previous?.returnOrigins.includes(item));
   if (!previous || config.webhookUrl !== previous.webhookUrl) changedOrigins.push(httpsUrl(config.webhookUrl).origin);
   requireThat(changedOrigins.every(item => scopes.some(scope => scopeContains(item, scope))), 403, 'INTEGRATION_SCOPE', '新增或变更的地址超出了授权域名范围');
+}
+function requiredOrigins(config: ClientConfig): string[] {
+  return [...new Set([...config.returnOrigins, origin(httpsUrl(config.webhookUrl).origin)])].sort();
+}
+function additionalOrigins(config: ClientConfig, grant: GrantView): string[] {
+  return requiredOrigins(config).filter(candidate => !grant.allowedOrigins.some(scope => scopeContains(candidate, scope)));
 }
 
 /** Encrypted tenant registry. Only this module may turn stored records into credentials. */
@@ -170,7 +182,10 @@ export class Registry {
       for (const grant of state.grants) {
         requireThat(record(grant) && /^grant_[a-f0-9]{32}$/.test(String(grant.id)) && /^[a-f0-9]{64}$/.test(String(grant.tokenHash))
           && (grant.mode === 'create' || grant.mode === 'update') && typeof grant.clientId === 'string' && Array.isArray(grant.allowedOrigins)
+          && (grant.domainMode === undefined || grant.domainMode === 'fixed' || grant.domainMode === 'auto')
+          && (grant.pricingMode === undefined || grant.pricingMode === 'detect' || grant.pricingMode === 'manual')
           && Number.isFinite(Date.parse(String(grant.expiresAt))), 503, 'REGISTRY_CORRUPT', '产品授权配置无效');
+        origins(grant.allowedOrigins, grant.domainMode === 'auto' ? 0 : 1, grant.domainMode === 'auto' ? 100 : 50);
       }
       for (const plan of state.plans) {
         requireThat(record(plan) && /^plan_[a-f0-9]{32}$/.test(String(plan.planId)) && /^[a-f0-9]{64}$/.test(String(plan.grantHash))
@@ -224,7 +239,8 @@ export class Registry {
       enabled: input.enabled ?? previous?.enabled ?? true,
     } as ClientConfig & { enabled: boolean };
     for (const sku of Object.values(config.skus)) {
-      requireThat(record(sku) && Object.keys(sku).every(key => ['subject', 'amount'].includes(key)), 400, 'INVALID_CLIENT_CONFIG', '商品仅允许 subject 与 amount');
+      requireThat(record(sku) && Object.keys(sku).every(key => ['subject', 'amount', 'enabled', 'description', 'entitlement'].includes(key)),
+        400, 'INVALID_CLIENT_CONFIG', '商品仅允许名称、金额、启用状态、说明与权益');
     }
     try {
       legacyClients({ ...this.env, CLIENTS_JSON: JSON.stringify([{ ...config, apiSecret: 'x'.repeat(64), webhookSecret: 'y'.repeat(64) }]) });
@@ -258,7 +274,9 @@ export class Registry {
   async audit(): Promise<PublicAuditEntry[]> { return structuredClone((await this.state()).audit); }
   async listGrants(): Promise<GrantView[]> {
     return (await this.state()).grants.filter(grant => Date.parse(grant.expiresAt) > this.now())
-      .map(({ id, clientId, mode, allowedOrigins, createdAt, expiresAt, revokedAt }) => ({ id, clientId, mode, allowedOrigins, createdAt, expiresAt, ...(revokedAt ? { revokedAt } : {}) }));
+      .map(({ id, clientId, mode, allowedOrigins, createdAt, expiresAt, revokedAt, domainMode, pricingMode }) => ({ id, clientId, mode,
+        allowedOrigins: [...allowedOrigins], domainMode: domainMode ?? 'fixed', pricingMode: pricingMode ?? 'detect',
+        createdAt, expiresAt, ...(revokedAt ? { revokedAt } : {}) }));
   }
 
   async revokeGrant(id: string, actor: string): Promise<void> {
@@ -299,17 +317,21 @@ export class Registry {
   }
 
   async createGrant(input: GrantInput, actor: string): Promise<IssuedGrant> {
-    requireThat(record(input) && Object.keys(input).every(key => ['clientId', 'mode', 'allowedOrigins', 'lifetimeSeconds'].includes(key)),
+    requireThat(record(input) && Object.keys(input).every(key => ['clientId', 'mode', 'allowedOrigins', 'lifetimeSeconds', 'domainMode', 'pricingMode'].includes(key)),
       400, 'INVALID_INTEGRATION_GRANT', '接入授权参数无效');
     clientId(input.clientId);
     actorName(actor);
     requireThat(input.mode === 'create' || input.mode === 'update', 400, 'INVALID_INTEGRATION_GRANT', '接入授权类型无效');
-    const allowedOrigins = origins(input.allowedOrigins);
+    const domainMode = input.domainMode ?? 'fixed';
+    const pricingMode = input.pricingMode ?? 'detect';
+    requireThat(domainMode === 'fixed' || domainMode === 'auto', 400, 'INVALID_INTEGRATION_GRANT', '域名授权模式无效');
+    requireThat(pricingMode === 'detect' || pricingMode === 'manual', 400, 'INVALID_INTEGRATION_GRANT', '套餐来源模式无效');
+    const allowedOrigins = origins(input.allowedOrigins, domainMode === 'auto' ? 0 : 1);
     const seconds = input.lifetimeSeconds ?? GRANT_SECONDS;
     requireThat(Number.isInteger(seconds) && seconds >= 60 && seconds <= GRANT_SECONDS, 400, 'INVALID_INTEGRATION_GRANT', '接入授权有效期必须在 1 分钟至 2 小时内');
     const milliseconds = this.now();
     const token = `brp_int_${`${randomNonce()}${randomNonce()}`.slice(0, 64)}`;
-    const view: GrantView = { id: randomId('grant_'), clientId: input.clientId, mode: input.mode, allowedOrigins,
+    const view: GrantView = { id: randomId('grant_'), clientId: input.clientId, mode: input.mode, allowedOrigins, domainMode, pricingMode,
       createdAt: new Date(milliseconds).toISOString(), expiresAt: new Date(milliseconds + seconds * 1000).toISOString() };
     await this.store.transaction(async tx => {
       const state = await this.state(tx);
@@ -330,6 +352,7 @@ export class Registry {
     requireThat(grant.mode !== 'create' || !client || !!grant.appliedPlanId, 409, 'GRANT_MODE_CONFLICT', '目标产品已由其他操作创建，请申请新的授权');
     return {
       clientId: grant.clientId, mode: grant.mode, allowedOrigins: [...grant.allowedOrigins], expiresAt: grant.expiresAt,
+      domainMode: grant.domainMode ?? 'fixed', pricingMode: grant.pricingMode ?? 'detect',
       client: client ? publicView(client) : null, credentials: client ? credentials(client) : null,
       payBaseUrl: this.env.PAY_BASE_URL, docsUrl: `${this.env.PAY_BASE_URL}/docs/integration.md`,
       paymentMode: this.env.PAYMENT_MODE,
@@ -350,15 +373,18 @@ export class Registry {
       const previous = this.target(state, grant.clientId, input.expectedVersion);
       requireThat(grant.mode === 'create' ? !previous : !!previous, 409, 'GRANT_MODE_CONFLICT', '授权类型与目标产品当前状态不一致');
       const after = this.config(input.config, previous);
-      enforceScope(after, previous, grant.allowedOrigins);
+      if (grant.domainMode !== 'auto') enforceScope(after, previous, grant.allowedOrigins);
+      const addedOrigins = grant.domainMode === 'auto' ? additionalOrigins(after, grant) : [];
+      requireThat(new Set([...grant.allowedOrigins, ...addedOrigins]).size <= 100, 400, 'INTEGRATION_SCOPE_LIMIT', '该授权记录的域名已达到上限');
       const plan: StoredPlan = {
         planId, clientId: grant.clientId, mode: grant.mode, baseVersion: input.expectedVersion,
         expiresAt: new Date(Math.min(milliseconds + PLAN_SECONDS * 1000, Date.parse(grant.expiresAt))).toISOString(),
-        before: previous ? publicView(previous) : null, after, grantHash: grant.tokenHash,
+        before: previous ? publicView(previous) : null, after, addedOrigins, grantHash: grant.tokenHash,
       };
       this.prune(state, milliseconds);
       state.plans.push(plan);
-      this.note(state, { at: new Date(milliseconds).toISOString(), actor: `integration:${grant.id}`, action: 'integration.planned', clientId: grant.clientId });
+      this.note(state, { at: new Date(milliseconds).toISOString(), actor: `integration:${grant.id}`, action: 'integration.planned', clientId: grant.clientId,
+        ...(addedOrigins.length ? { addedOrigins } : {}) });
       await this.save(tx, state, milliseconds);
       const { grantHash: _hash, ...view } = plan;
       return view;
@@ -380,7 +406,9 @@ export class Registry {
       const previous = this.target(state, grant.clientId, plan.baseVersion);
       requireThat(grant.mode === 'create' ? !previous : !!previous, 409, 'GRANT_MODE_CONFLICT', '授权类型与目标产品当前状态不一致');
       const config = this.config(plan.after, previous);
-      enforceScope(config, previous, grant.allowedOrigins);
+      if (grant.domainMode !== 'auto') enforceScope(config, previous, grant.allowedOrigins);
+      const addedOrigins = grant.domainMode === 'auto' ? additionalOrigins(config, grant) : [];
+      if (grant.domainMode === 'auto') grant.allowedOrigins = origins([...new Set([...grant.allowedOrigins, ...addedOrigins])], 0, 100);
       const updated: ManagedClient = { ...previous, ...config,
         apiSecret: previous?.apiSecret ?? `${randomNonce()}${randomNonce()}`.slice(0, 64),
         webhookSecret: previous?.webhookSecret ?? `${randomNonce()}${randomNonce()}`.slice(0, 64),
@@ -390,7 +418,8 @@ export class Registry {
       const result = { client: publicView(updated), credentials: credentials(updated), appliedAt: new Date(milliseconds).toISOString() };
       plan.result = structuredClone(result);
       grant.appliedPlanId = plan.planId;
-      this.note(state, { at: result.appliedAt, actor: `integration:${grant.id}`, action: 'integration.applied', clientId: grant.clientId, version: result.client.version });
+      this.note(state, { at: result.appliedAt, actor: `integration:${grant.id}`, action: 'integration.applied', clientId: grant.clientId,
+        version: result.client.version, ...(addedOrigins.length ? { addedOrigins } : {}) });
       await this.save(tx, state, milliseconds);
       return result;
     });

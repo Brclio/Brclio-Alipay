@@ -23,6 +23,14 @@ export interface Env {
   INTEGRATION_LIMITER?: {limit(options:{key:string}):Promise<{success:boolean}>};
   PAYMENT_API_LIMITER?: {limit(options:{key:string}):Promise<{success:boolean}>};
 }
+export interface ProductSku {
+  subject: string;
+  amount: string;
+  enabled?: boolean;
+  description?: string;
+  /** Human-readable rule; fulfillment remains the product backend's responsibility. */
+  entitlement?: string;
+}
 export interface ProductClient {
   id: string;
   name: string;
@@ -30,7 +38,7 @@ export interface ProductClient {
   webhookSecret: string;
   webhookUrl: string;
   returnOrigins: string[];
-  skus: Record<string, {subject: string; amount: string}>;
+  skus: Record<string, ProductSku>;
   enabled?: boolean;
 }
 export interface Order {
@@ -75,4 +83,11 @@ export interface Transaction {
 export interface Store {
   readJson<T>(path: string): Promise<T | null>;
   transaction<T>(callback: (tx: Transaction) => Promise<T>): Promise<T>;
+  /** Immutable, bounded directory listing for administrator reporting/backfill. */
+  openSnapshot?(): Promise<StoreSnapshot>;
+}
+export interface StoreSnapshot {
+  revision: string;
+  listJsonPaths(prefix: string): string[];
+  readJson<T>(path: string): Promise<T | null>;
 }

@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import type { Store, Transaction } from './types';
+import type { Store, StoreSnapshot, Transaction } from './types';
 
 const API = 'https://api.github.com';
 const MAX_FILE_BYTES = 256 * 1024;
@@ -264,6 +264,23 @@ export class GitHubStore implements Store {
     }
     if (file.type !== 'file') throw new GitHubError('GitHub payment data must be a JSON file', 503, 'INVALID_DATA_FILE');
     return this.decodeBlob<T>(file);
+  }
+
+  async openSnapshot(): Promise<StoreSnapshot> {
+    const snapshot = await this.snapshot();
+    return {
+      revision: snapshot.commitSha,
+      listJsonPaths: (prefix: string): string[] => {
+        if (typeof prefix !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_/-]*\/$/.test(prefix)
+          || prefix.length > 200 || prefix.includes('//') || prefix.includes('..')) {
+          throw new TypeError('Listing requires a safe relative directory prefix');
+        }
+        const paths = [...snapshot.files.keys()].filter(path => path.startsWith(prefix) && path.endsWith('.json')).sort();
+        if (paths.length > 20_000) throw new GitHubError('Reporting listing exceeds its bounded capacity', 503, 'REPORTING_CAPACITY');
+        return paths;
+      },
+      readJson: <T>(path: string) => this.readSnapshot<T>(snapshot, path),
+    };
   }
 
   async transaction<T>(callback: (tx: Transaction) => Promise<T>): Promise<T> {

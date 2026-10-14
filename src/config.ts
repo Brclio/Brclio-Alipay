@@ -38,6 +38,11 @@ export function clients(env: Env): ProductClient[] {
     for (const [sku, item] of Object.entries(c.skus)) {
       requireThat(item && /^[a-zA-Z0-9_-]{1,80}$/.test(sku) && typeof item.subject === 'string' && item.subject.length > 0 && item.subject.length <= 120,503,'CONFIGURATION','商品配置无效');
       money(item.amount);
+      requireThat(item.enabled === undefined || typeof item.enabled === 'boolean',503,'CONFIGURATION','商品启用状态配置无效');
+      for (const [value, maximum] of [[item.description, 500], [item.entitlement, 1000]] as const) {
+        requireThat(value === undefined || (typeof value === 'string' && value.length > 0 && value.length <= maximum
+          && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)),503,'CONFIGURATION','商品说明或权益配置无效');
+      }
     }
     for (const origin of c.returnOrigins) {
       requireThat(typeof origin === 'string' && (/^https:\/\/\*\.[a-z0-9.-]+$/.test(origin) || httpsUrl(origin).origin === origin),503,'CONFIGURATION','返回域名配置无效');

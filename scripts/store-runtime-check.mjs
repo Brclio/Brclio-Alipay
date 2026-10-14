@@ -25,7 +25,11 @@ try {
         if (request.method !== 'GET') githubWrites++;
         if (request.method === 'GET' && request.headers.get('authorization') === 'Bearer fixture-token'
           && request.headers.get('user-agent') === 'Brclio-Pay/0.1') authenticatedReads++;
-        if (url.pathname === '/repos/fixture/private' || url.pathname === '/repos/fixture/existing') return Response.json({ private: true });
+        if (['/repos/fixture/private','/repos/fixture/existing','/repos/fixture/snapshot'].includes(url.pathname)) return Response.json({ private: true });
+        if(url.pathname==='/repos/fixture/snapshot/git/ref/heads/main')return Response.json({ref:'refs/heads/main',object:{type:'commit',sha:'1'.repeat(40)}});
+        if(url.pathname==='/repos/fixture/snapshot/git/commits/'+'1'.repeat(40))return Response.json({tree:{sha:'2'.repeat(40)}});
+        if(url.pathname==='/repos/fixture/snapshot/git/trees/'+'2'.repeat(40))return Response.json({truncated:false,tree:[{path:'orders/pay_native.json',type:'blob',mode:'100644',sha:createHash('sha1').update(content).digest('hex'),size:Buffer.byteLength(content)}]});
+        if(url.pathname==='/repos/fixture/snapshot/git/blobs/'+createHash('sha1').update(content).digest('hex'))return Response.json({encoding:'base64',content:Buffer.from(content).toString('base64'),size:Buffer.byteLength(content),sha:createHash('sha1').update(content).digest('hex')});
         if (url.pathname === '/repos/fixture/redirect') return new Response(null, { status: 302, headers: { Location: 'https://never-follow.runtime.invalid/' } });
         if (url.pathname === '/repos/fixture/private/contents/system/clients.enc.json') return new Response('{}', { status: 404 });
         if (url.pathname === '/repos/fixture/existing/contents/orders/pay_native.json') return Response.json({
@@ -56,7 +60,7 @@ try {
   for (const passed of Object.values(checks)) assert.equal(passed, true);
   assert.equal(unexpected, 0);
   assert.equal(githubWrites, 0);
-  assert.equal(authenticatedReads, 5);
+  assert.equal(authenticatedReads, 10);
   assert.equal(signedWebhookRequests, 2);
   assert.equal(signedExampleRequests, 4);
   console.log(JSON.stringify({ networkWorkerd: true, ...checks, redirectsNeverFollowed: true, githubReadOnly: true, authenticationHeadersSent: true, exampleRequestSignaturesVerified: true }));

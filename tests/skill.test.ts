@@ -57,6 +57,34 @@ describe('portable skill delivery', () => {
     expect(() => makeIntegrationPrompt({ clientId: 'one-product', mode: 'update', token: grant + '\nInjected', expiresAt: '2026-10-14T12:00:00Z', baseUrl: cliEnv.BRCLIO_PAY_BASE_URL })).toThrow();
     expect(() => makeIntegrationPrompt({ clientId: 'one-product', mode: 'update', token: grant, expiresAt: 'invalid', baseUrl: 'http://pay.bornforthis.cn' })).toThrow();
   });
+
+  it('selects project detection by default or explicit manual pricing independently of grant and payment modes', () => {
+    const options = { clientId: 'one-product', mode: 'update' as const, paymentMode: 'live' as const,
+      token: grant, expiresAt: '2026-10-14T12:00:00Z', baseUrl: cliEnv.BRCLIO_PAY_BASE_URL };
+    const detected = makeIntegrationPrompt(options);
+    const manual = makeIntegrationPrompt({ ...options, pricingMode: 'manual' });
+    expect(detected).toContain('套餐来源模式：detect：');
+    expect(manual).toContain('套餐来源模式：manual：');
+    for (const prompt of [detected, manual]) {
+      expect(prompt).toContain('操作类型：修改该产品现有接入');
+      expect(prompt).toContain('支付环境：live');
+      expect(prompt).toContain('context.allowedOrigins');
+      expect(prompt).toContain('历史订单继续按创建时快照核对');
+    }
+    expect(() => makeIntegrationPrompt({ ...options, pricingMode: 'invent' as 'detect' })).toThrow();
+  });
+
+  it('distinguishes explicitly authorized automatic domains from legacy fixed scopes in self-contained tasks', () => {
+    const options = { clientId: 'one-product', mode: 'create' as const, token: grant,
+      expiresAt: '2026-10-14T12:00:00Z', baseUrl: cliEnv.BRCLIO_PAY_BASE_URL };
+    const fixed = makeIntegrationPrompt(options);
+    const auto = makeIntegrationPrompt({ ...options, domainMode: 'auto' });
+    expect(fixed).toContain('域名授权模式：fixed：');
+    expect(auto).toContain('域名授权模式：auto：');
+    expect(auto).toContain('addedOrigins');
+    expect(auto).toContain('不需逐个再次授权');
+    expect(() => makeIntegrationPrompt({ ...options, domainMode: 'open' as 'auto' })).toThrow();
+  });
 });
 
 describe('repository inspection forward fixture', () => {
@@ -87,6 +115,31 @@ describe('repository inspection forward fixture', () => {
     expect(await inspectPlatform(directory)).toEqual(result);
     const executableOutput = execFileSync(process.execPath, [new URL('../skills/brclio-pay-integrate/scripts/inspect-platform.mjs', import.meta.url).pathname, directory], { encoding: 'utf8' });
     expect(JSON.parse(executableOutput)).toEqual(result);
+  });
+
+  it('locates plan evidence with file and line hints without extracting prices, fixtures or credentials', async () => {
+    const directory = await workspace();
+    for (const folder of ['src/server', 'src/pages', 'docs', 'prisma', 'tests/fixtures']) await mkdir(path.join(directory, folder), { recursive: true });
+    const catalog = 'export const plans = {\n  monthly: { sku: "monthly", price: "123.45", currency: "USD", credits: 100 }\n};\n';
+    await writeFile(path.join(directory, 'src/server/plans.ts'), catalog);
+    await writeFile(path.join(directory, 'src/pages/pricing.tsx'), 'export const price = "123.45";\n');
+    await writeFile(path.join(directory, 'docs/pricing.md'), '# Monthly plan\nPrice: 123.45\nValidity: 30 days\n');
+    await writeFile(path.join(directory, 'prisma/schema.prisma'), 'model Plan {\n  id String @id\n  price Decimal\n}\n');
+    await writeFile(path.join(directory, 'tests/fixtures/pricing.json'), '{"sku":"fake", "price":"987.65"}');
+    await writeFile(path.join(directory, '.env.pricing'), 'PRIVATE_PRICE=666.66\nTOKEN=DO_NOT_READ');
+    const { inspectPlatform } = await import(new URL('../skills/brclio-pay-integrate/scripts/inspect-platform.mjs', import.meta.url).href);
+    const result = await inspectPlatform(directory);
+    expect(result.catalogCandidates).toEqual(expect.arrayContaining([
+      { path: 'src/server/plans.ts', line: 2, kind: 'server-config', signals: ['amount', 'catalog', 'entitlement', 'currency'] },
+      expect.objectContaining({ path: 'src/pages/pricing.tsx', line: 1, kind: 'display' }),
+      expect.objectContaining({ path: 'docs/pricing.md', line: 2, kind: 'documentation' }),
+      expect.objectContaining({ path: 'prisma/schema.prisma', line: 3, kind: 'data-schema' }),
+    ]));
+    expect(result.catalogCandidates.some((item: { path: string }) => item.path.startsWith('tests/'))).toBe(false);
+    const output = JSON.stringify(result);
+    for (const value of ['123.45', '987.65', '666.66', 'DO_NOT_READ']) expect(output).not.toContain(value);
+    expect(await readFile(path.join(directory, 'src/server/plans.ts'), 'utf8')).toBe(catalog);
+    expect(result.catalogTruncated).toBe(false);
   });
 });
 
