@@ -23,6 +23,10 @@ npm run dev
 
 没有配置商户密钥时，首页正常展示；`GET /api/health` 返回 `ready:false`，收款接口拒绝交易。没有假支付成功模式。
 
+## 自动验证与部署
+
+GitHub 的 `main` 推送、Pull Request 和手动运行会执行 `npm run ci:verify`，只验证代码、构建与 Worker 运行时，不读取支付或部署 Secrets。生产自动部署由 Cloudflare Workers Builds 执行，需先在 Cloudflare 完成仓库绑定；配置步骤与当前状态见[部署文档的自动部署部分](docs/deployment.md#github-自动部署)。GitHub 验证通过不代表生产已经部署。
+
 ## 首次设置
 
 ```sh

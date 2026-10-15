@@ -11,6 +11,53 @@
 - 本机 secrets/ 不提交 Git；运行时密钥存 Cloudflare Worker Secrets。
 - 管理入口 `/admin`；账户、加密注册表及单平台 AI 授权见 [接入管理](admin.md)。
 
+## GitHub 自动部署
+
+目标代码仓库为 `Brclio/Brclio-Alipay`，生产分支为 `main`。使用 **Cloudflare Workers Builds** 监听推送，由同一次构建顺序发布已有 Worker 和 Pages。私有账本仓库不接入构建，也不触发代码发布。
+
+现有 Pages `brclio-pay` 是 Direct Upload 项目，不能原地切换到 Pages Git integration。保留该项目、自定义域名与 PAYMENT_BACKEND 绑定，构建通过现有 `deploy:pages` 命令上传入口；不重建项目、不修改阿里云 DNS。参见 [Cloudflare Direct Upload](https://developers.cloudflare.com/pages/get-started/direct-upload/) 和 [Workers Builds 配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)。
+
+代码提供两条统一命令：
+
+```sh
+npm run ci:verify
+npm run deploy:all
+```
+
+`ci:verify` 先同步 Skill 和文档，再运行类型检查、自动测试、构建与 workerd 运行时验证。测试使用临时内存凭据和模拟上游，不执行真实付款。`deploy:all` 先发布 Worker，再发布 Pages，最后执行只读 HTTPS 验收。任何步骤失败均返回非零退出码，不继续后续发布步骤。
+
+`.github/workflows/ci.yml` 为 main 推送、Pull Request 与手动触发提供 GitHub 检查；它只有 `contents:read` 权限，不接收部署凭据，也不发布生产服务。生产发布只由 Cloudflare 这一条路径负责，避免两个发布器竞争。
+
+### 一次性控制台绑定
+
+在 Cloudflare 当前账户的 **Workers & Pages → Worker brclio-pay → Settings → Builds → Connect** 中选择 GitHub 仓库。注意选择 Worker，Pages 项目保持 Direct Upload。
+
+| 配置 | 值 |
+| --- | --- |
+| Git repository | `Brclio/Brclio-Alipay` |
+| Production branch | `main` |
+| Root directory | `/` |
+| Build command | `npm ci && npm run ci:verify` |
+| Deploy command | `npm run deploy:all` |
+| Non-production / preview builds | 关闭，其他分支仅运行 GitHub CI |
+| Build variable `NODE_VERSION` | `22` |
+| Build variable `SKIP_DEPENDENCY_INSTALL` | `1`（安装由上述 `npm ci` 统一执行） |
+| Build variable `CLOUDFLARE_ACCOUNT_ID` | `c8b059429c868f6d0e528f9e10325f46` |
+
+Build API token 使用该账户内的 `Workers Scripts:Edit`、`Cloudflare Pages:Edit` 及 `Account Settings:Read` 权限。Cloudflare 自动创建的默认 Worker 构建令牌不包含 Pages 权限，不能直接用于本项目的双发布。选择已具备这些权限的令牌，或由账户持有人创建相应令牌并在 Builds 中选择；令牌只存本机 `secrets/` 或 Cloudflare 的构建 Secret，不复制到 GitHub、聊天或日志。支付宝私钥、管理密码、注册表加密 key 与私有 GitHub 账本凭据仅在原 Worker runtime Secrets 中，构建不需要它们。
+
+第一次绑定需存在 Cloudflare GitHub App 的仓库访问授权。只需要代码仓库；本次已只读确认 Brclio 组织现有安装可访问该仓库，不代表构建触发器已经建立。若控制台要求新增 App 授权、创建认证凭据或验证账户，由账户持有人完成对应确认。
+
+### 发布验收、重试与回退
+
+首次绑定后推送一个提交，确认 Cloudflare Builds 自动启动，记录 Git commit、Build ID、Worker version 和 Pages deployment ID。仅看到“仓库已连接”不能证明自动发布成功。`node scripts/deployment-preflight.mjs` 检查 Worker 与域名入口的版本、环境及实际收款状态和仓库配置一致，并检查后台资源、匿名管理接口拒绝与静态 Skill ZIP 不公开；不登录后台、不创建订单、不调用支付宝。HTTPS 成功说明该连接的证书可用；域名控制台状态另用本机 `node scripts/pages-domain.mjs status` 查看。
+
+Worker 和 Pages 是两次发布，不能视为原子部署。若 Worker 已成功、Pages 失败，先修复权限或上传问题，再从相同提交重试；不要重新生成任何业务 Secret。Cloudflare 可能跳过尚未启动的旧排队构建，但不能依赖它回滚或取消已经开始的发布。生产只使用 main，不建立第二条自动发布路径；回退用 Git revert 后推送 main，并验证两部分均更新。
+
+自动部署只改变代码和配置。`wrangler.jsonc` 中 vars 会随发布应用，`PAYMENT_ENABLED` 仍需按人工实付验收流程控制；不能在控制台临时改开关后期待下次 Git 发布自动保留。既有 Worker Secrets 由 Wrangler 保留，流水线不执行 `bootstrap`、`prepare-secrets`、`configure-admin` 或 `secret bulk`。
+
+**2026-10-15 绑定进度**：统一命令、CI 与只读验收已准备，195 项自动测试及全部运行时检查通过；现有 Worker 和域名入口的只读预检通过。现有 Wrangler OAuth 可发布 Worker/Pages，但 Builds API 返回 403，尚未确认生产 Git 触发器。完成控制台绑定并取得真实推送构建证据后再更新此状态。
+
 ## 商户 RSA 密钥
 
 `node scripts/bootstrap.mjs` 生成 RSA2048 PKCS8 应用私钥以及应用公钥，已有密钥不会被覆盖。

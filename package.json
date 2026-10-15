@@ -17,7 +17,9 @@
     "test:runtime": "node scripts/runtime-check.mjs",
     "test:security-runtime": "node scripts/admin-runtime-check.mjs && node scripts/registry-runtime-check.mjs && node scripts/store-runtime-check.mjs",
     "client": "node examples/client.mjs",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "ci:verify": "node scripts/build-skill.mjs && node scripts/sync-docs.mjs && npm run check && npm run test:runtime && npm run test:security-runtime",
+    "deploy:all": "npm run deploy && npm run deploy:pages && node scripts/deployment-preflight.mjs"
   },
   "dependencies": {
     "alipay-sdk": "4.14.0"
