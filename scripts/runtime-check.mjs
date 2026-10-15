@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
-import { builtinModules } from 'node:module';
+import { isBuiltin } from 'node:module';
 import { createHash, createHmac, createSign, createVerify, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { convertV4MiniflareOptions, Log, LogLevel, Miniflare } from 'miniflare';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const builtins = new Set(builtinModules.map(name => name.replace(/^node:/, '')));
 let runtime;
 let checks;
 let diagnostic;
+let phase = 'bundle';
+let responseStatus;
 let sdkLogCount = 0;
 let nativeQueryCalls = 0;
 try {
@@ -31,7 +32,9 @@ try {
       setup(context) {
         context.onResolve({ filter: /./ }, args => {
           const name = args.path.replace(/^node:/, '');
-          if (!builtins.has(name)) return undefined;
+          // Prefix-only modules (for example node:sqlite) are valid builtins
+          // even when omitted from builtinModules on a supported Node release.
+          if (!isBuiltin(args.path)) return undefined;
           if (args.namespace === 'workerd-node-builtins') return { path: `node:${name}`, external: true };
           if (args.path === 'node:util') return { path: fileURLToPath(new URL('../src/safe-node-util.ts', import.meta.url)) };
           return { path: name, namespace: 'workerd-node-builtins' };
@@ -43,6 +46,7 @@ try {
       },
     }],
   });
+  phase = 'fixtures';
   const app = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const provider = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const sellerId = '2088123456789012';
@@ -61,6 +65,7 @@ try {
   const hmacSecret = randomBytes(32).toString('hex');
   const runtimeToken = randomBytes(32).toString('hex');
   const message = 'runtime\n中文 + 100%';
+  phase = 'runtime-config';
   runtime = new Miniflare(convertV4MiniflareOptions({
     host: '127.0.0.1',
     port: 0,
@@ -100,14 +105,19 @@ try {
       },
     }],
   }));
+  phase = 'runtime-dispatch';
   const response = await runtime.dispatchFetch('http://runtime.test/', {
     method: 'POST', headers: { authorization: `Bearer ${runtimeToken}` },
   });
+  responseStatus = response.status;
+  phase = 'response-json';
   const result = await response.json();
   checks = result.checks;
   diagnostic = result.diagnostic;
+  phase = 'worker-checks';
   assert.equal(response.status, 200);
   for (const passed of Object.values(result.checks)) assert.equal(passed, true);
+  phase = 'payment-signature';
   const payment = new URL(result.paymentUrl);
   assert.equal(payment.hostname, 'openapi-sandbox.dl.alipaydev.com');
   const signature = payment.searchParams.get('sign');
@@ -115,14 +125,25 @@ try {
   params.delete('sign');
   const signContent = [...params].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join('&');
   assert.equal(createVerify('RSA-SHA256').update(signContent, 'utf8').verify(app.publicKey, signature, 'base64'), true);
+  phase = 'payment-timestamp';
   const timestamp = Date.parse(`${payment.searchParams.get('timestamp').replace(' ', 'T')}+08:00`);
   assert.equal(Math.abs(timestamp - Date.now()) < 10_000, true);
+  phase = 'runtime-final-checks';
   assert.equal(sdkLogCount, 0);
   assert.equal(nativeQueryCalls,1);
   console.log(JSON.stringify({ workerdRuntime: true, ...result.checks, nativeQueryRequestSignature:true, paymentRequestSignature: true, chinaTimestamp: true, sdkLogsSuppressed: true }));
 } catch (error) {
   // Avoid printing provider errors, full signed URLs, bindings, or ephemeral keys.
-  console.error(JSON.stringify({ workerdRuntime: false, errorType: error?.name ?? 'Error', ...checks, diagnostic }));
+  const errorTypes = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'AssertionError']);
+  const allowedCodes = new Set(['ERR_RUNTIME_FAILURE', 'ERR_ADDRESS_IN_USE', 'ERR_MODULE_NOT_FOUND', 'ERR_UNKNOWN_BUILTIN_MODULE', 'ENOENT', 'EACCES', 'ECONNREFUSED', 'ERR_ASSERTION']);
+  const errorCode = allowedCodes.has(error?.code) ? error.code : allowedCodes.has(error?.cause?.code) ? error.cause.code : 'UNKNOWN';
+  // Classify esbuild's known unresolved-builtin failure without exposing text.
+  const unresolvedBuiltin = phase === 'bundle' && Array.isArray(error?.errors)
+    && error.errors.some(item => typeof item?.text === 'string' && /Could not resolve ["']node:[a-z_]+["']/.test(item.text));
+  console.error(JSON.stringify({ workerdRuntime: false, phase,
+    errorType: errorTypes.has(error?.name) ? error.name : 'Error', errorCode,
+    ...(unresolvedBuiltin ? { unresolvedBuiltin: true } : {}),
+    ...(Number.isInteger(responseStatus) ? { responseStatus } : {}), ...checks, diagnostic }));
   process.exitCode = 1;
 } finally {
   try { await runtime?.dispose(); } catch { process.exitCode = 1; }
