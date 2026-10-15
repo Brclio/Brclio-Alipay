@@ -43,10 +43,13 @@ npm run deploy:all
 | Build variable `NODE_VERSION` | `22` |
 | Build variable `SKIP_DEPENDENCY_INSTALL` | `1`（安装由上述 `npm ci` 统一执行） |
 | Build variable `CLOUDFLARE_ACCOUNT_ID` | `c8b059429c868f6d0e528f9e10325f46` |
+| Build variable `WRANGLER_SEND_METRICS` | `false` |
 
 Build API token 使用该账户内的 `Workers Scripts:Edit`、`Cloudflare Pages:Edit` 及 `Account Settings:Read` 权限。Cloudflare 自动创建的默认 Worker 构建令牌不包含 Pages 权限，不能直接用于本项目的双发布。选择已具备这些权限的令牌，或由账户持有人创建相应令牌并在 Builds 中选择；令牌只存本机 `secrets/` 或 Cloudflare 的构建 Secret，不复制到 GitHub、聊天或日志。支付宝私钥、管理密码、注册表加密 key 与私有 GitHub 账本凭据仅在原 Worker runtime Secrets 中，构建不需要它们。
 
-第一次绑定需存在 Cloudflare GitHub App 的仓库访问授权。只需要代码仓库；本次已只读确认 Brclio 组织现有安装可访问该仓库，不代表构建触发器已经建立。若控制台要求新增 App 授权、创建认证凭据或验证账户，由账户持有人完成对应确认。
+第一次绑定需存在 Cloudflare GitHub App 的仓库访问授权。构建只连接代码仓库，不连接 BrclioData 私有账本。2026-10-15 已重新安装 Brclio 组织的 App 并恢复当前 Cloudflare 账户关联；若后续控制台要求新增 App 授权、创建认证凭据或验证账户，由账户持有人完成对应确认。
+
+若 GitHub 已安装 App，但 Cloudflare 找不到 Brclio 仓库或连接返回 `8000008`（Git account disconnected），需检查该安装是否关联当前 Cloudflare 账户；已有安装不能证明关联有效。Cloudflare 建议一个 GitHub 账户只关联一个 Cloudflare 账户，Workers 与 Pages 共用 App。通过当前账户的连接入口重新授权；确需卸载重装时，只处理 Brclio 组织中的 Cloudflare Workers and Pages，保留原仓库授权范围，并先评估相关项目的新构建会暂停。已部署服务仍继续托管。参见 [GitHub 集成与重新安装](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/#reinstall-the-cloudflare-github-app)。
 
 ### 发布验收、重试与回退
 
@@ -56,7 +59,7 @@ Worker 和 Pages 是两次发布，不能视为原子部署。若 Worker 已成�
 
 自动部署只改变代码和配置。`wrangler.jsonc` 中 vars 会随发布应用，`PAYMENT_ENABLED` 仍需按人工实付验收流程控制；不能在控制台临时改开关后期待下次 Git 发布自动保留。既有 Worker Secrets 由 Wrangler 保留，流水线不执行 `bootstrap`、`prepare-secrets`、`configure-admin` 或 `secret bulk`。
 
-**2026-10-15 绑定进度**：统一命令、CI 与只读验收已准备，195 项自动测试及全部运行时检查通过；现有 Worker 和域名入口的只读预检通过。现有 Wrangler OAuth 可发布 Worker/Pages，但 Builds API 返回 403，尚未确认生产 Git 触发器。完成控制台绑定并取得真实推送构建证据后再更新此状态。
+**2026-10-15 绑定配置**：Cloudflare 仓库连接已建立，Worker 只有一个生产触发器 `b3209105-b573-4810-b91b-f04ca466a8d9`，分支仅 `main`，构建/发布命令及上述四项变量已配置。专用令牌已登记在 Cloudflare Builds。统一验证包含 195 项自动测试及运行时检查，GitHub CI 的 `ab0f353` 提交验证成功；后续推送执行相同流程。某次发布是否成功，仍须按该提交的 `build_outcome=success`、Worker version、Pages deployment 和 HTTPS 验收结果判断。
 
 ## 商户 RSA 密钥
 
