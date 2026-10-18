@@ -11,12 +11,18 @@ export function createPaymentClient({baseUrl='https://pay.bornforthis.cn',client
     const signature=hmac(apiSecret,[method,path,timestamp,nonce,hash(body)].join('\n'));
     const response=await fetcher(new URL(path,baseUrl),{method,redirect:'manual',signal:AbortSignal.timeout(30_000),headers:{'Content-Type':'application/json','X-Brclio-Client':clientId,'X-Brclio-Timestamp':timestamp,'X-Brclio-Nonce':nonce,'X-Brclio-Signature':signature},...(body?{body}:{})});
     const result=await response.json();
-    if(!response.ok)throw new Error(result.error?.message || `Payment API HTTP ${response.status}`);
+    if(!response.ok) {
+      const error=new Error(result.error?.message || `Payment API HTTP ${response.status}`);
+      error.code=typeof result.error?.code==='string' && /^[A-Z_]{1,80}$/.test(result.error.code)?result.error.code:'PAYMENT_API_ERROR';
+      error.status=response.status;
+      throw error;
+    }
     return result;
   }
   function checkedId(id){if(!/^pay_[a-f0-9]{32}$/.test(id))throw new Error('Invalid payment order ID');return id;}
   return {
     // Read through the product backend; do not cache indefinitely in a frontend or build.
+    // acceptingPayments=false pauses new purchases; keep catalog prices and existing order/status flows.
     catalog:()=>call('GET','/api/v1/catalog'),
     createOrder:({productOrderId,sku,returnUrl})=>call('POST','/api/v1/orders',{productOrderId,sku,returnUrl}),
     getOrder:id=>call('GET',`/api/v1/orders/${checkedId(id)}`),

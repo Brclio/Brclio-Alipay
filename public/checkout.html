@@ -34,6 +34,7 @@
         <section class="payment-status" id="statusPanel" aria-live="polite" aria-atomic="true"><span class="status-badge" id="statusBadge">正在连接</span><h2 id="statusTitle">即将为你打开订单</h2><p id="statusCopy">请稍候，收银台正在读取订单的最新状态。</p></section>
         <div id="paymentOptions" hidden><fieldset class="channel-options"><legend>付款方式</legend><label class="channel-option"><input type="radio" name="channel" value="page" checked><span><strong>电脑网页</strong><small>打开支付宝电脑收银台</small></span></label><label class="channel-option"><input type="radio" name="channel" value="wap"><span><strong>手机网页</strong><small>使用手机浏览器或支付宝</small></span></label></fieldset><button class="button button-primary pay-button" id="payButton" type="button">前往支付宝付款 <span aria-hidden="true">↗</span></button></div>
         <div class="checkout-actions"><button class="button button-secondary" id="refreshButton" type="button" hidden>我已付款，刷新状态</button><a class="return-link" id="returnLink" href="/" hidden>返回产品 <span aria-hidden="true">↗</span></a></div>
+        <div id="autoReturnNotice" hidden><p class="poll-note" id="autoReturnCopy" role="status"></p><button class="button button-secondary" id="stayButton" type="button">留在此页</button></div>
         <p class="poll-note" id="pollNote">支付结果以服务端确认为准。</p>
       </div>
     </div>

@@ -12,6 +12,17 @@ const WORKER_URL = 'https://brclio-pay.brclio-xhs.workers.dev';
 const MAX_ATTEMPTS = 3;
 const MAX_BODY_BYTES = 512 * 1024;
 const hash = value => createHash('sha256').update(value).digest('hex');
+const publicAssetNames = ['styles.css', 'admin.css', 'admin.js', 'checkout.js', 'landing.js'];
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+function secureAsset(response) {
+  return response.headers.get('Cache-Control') === 'no-store'
+    && response.headers.get('X-Content-Type-Options') === 'nosniff'
+    && response.headers.get('Referrer-Policy') === 'no-referrer'
+    && response.headers.get('Content-Security-Policy') === contentSecurityPolicy
+    && response.headers.get('Permissions-Policy') === 'camera=(), microphone=(), geolocation=()'
+    && response.headers.get('Strict-Transport-Security') === 'max-age=31536000';
+}
 
 function httpsOrigin(value) {
   const url = new URL(value);
@@ -33,6 +44,10 @@ export function loadDeploymentExpectations(root = ROOT) {
     publicUrl: httpsOrigin(vars.PAY_BASE_URL),
     adminPageHash: hash(readFileSync(path.join(root, 'public/admin.html'))),
     adminScriptHash: hash(readFileSync(path.join(root, 'public/admin.js'))),
+    checkoutPageHash: hash(readFileSync(path.join(root, 'public/checkout.html'))),
+    publicAssets: Object.fromEntries(publicAssetNames.map(name => ['/' + name, {
+      hash: hash(readFileSync(path.join(root, 'public', name))), type: name.endsWith('.css') ? 'css' : 'js',
+    }])),
   };
 }
 
@@ -81,6 +96,12 @@ export async function runDeploymentPreflight({ expected, fetcher = fetch, dispat
     || typeof expected?.version !== 'string' || !['live', 'sandbox'].includes(expected.paymentMode)
     || typeof expected.paymentEnabled !== 'boolean' || !/^[a-f0-9]{64}$/.test(expected.adminPageHash)
     || !/^[a-f0-9]{64}$/.test(expected.adminScriptHash)) throw new Error('Invalid preflight configuration');
+  if (expected.publicAssets !== undefined && (!expected.publicAssets || typeof expected.publicAssets !== 'object'
+    || Array.isArray(expected.publicAssets) || !Object.keys(expected.publicAssets).length
+    || !/^[a-f0-9]{64}$/.test(expected.checkoutPageHash)
+    || Object.entries(expected.publicAssets).some(([route, asset]) => !publicAssetNames.includes(route.slice(1))
+      || route !== '/' + route.slice(1) || !asset || !/^[a-f0-9]{64}$/.test(asset.hash)
+      || asset.type !== (route.endsWith('.css') ? 'css' : 'js')))) throw new Error('Invalid public asset verification');
   const targets = { worker: httpsOrigin(expected.workerUrl), domain: httpsOrigin(expected.publicUrl) };
   const month = new Date(now + 8 * 3600000).toISOString().slice(0, 7);
   const options = { fetcher, dispatcher, sleep, attempts };
@@ -107,6 +128,19 @@ export async function runDeploymentPreflight({ expected, fetcher = fetch, dispat
     anonymousSkill: ['/api/admin/skill.zip', validStatus(401)],
     staticSkill: ['/skills/brclio-pay-integrate.zip', validStatus(404)],
   };
+  if (expected.publicAssets) {
+    endpoints.checkoutPage = ['/checkout/pay_00000000000000000000000000000001', (response, bytes) => ({
+      passed: response.status === 200 && /text\/html/i.test(response.headers.get('content-type') || '')
+        && hash(bytes) === expected.checkoutPageHash && secureAsset(response),
+    })];
+    endpoints.checkoutWithoutToken = ['/api/checkout/pay_00000000000000000000000000000001', validStatus(401)];
+    for (const [route, asset] of Object.entries(expected.publicAssets)) {
+      endpoints['publicAsset:' + route] = [route, (response, bytes) => ({
+        passed: response.status === 200 && hash(bytes) === asset.hash && secureAsset(response)
+          && (asset.type === 'css' ? /text\/css/i : /(?:application|text)\/javascript/i).test(response.headers.get('content-type') || ''),
+      })];
+    }
+  }
   const results = await Promise.all(Object.entries(targets).map(async ([label, base]) => [label,
     Object.fromEntries(await Promise.all(Object.entries(endpoints).map(async ([name, [route, validate]]) => [name,
       await probe(base, route, validate, options)])))]));

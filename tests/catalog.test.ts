@@ -186,4 +186,13 @@ describe('server payment client catalog access', () => {
     await expect(client.catalog()).rejects.toThrow('目录暂不可用');
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+
+  it('preserves the disabled payment code so a product can stop blind retries', async () => {
+    const { createPaymentClient } = await import(new URL('../examples/payment-client.mjs', import.meta.url).href);
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ error: { code: 'PAYMENTS_DISABLED', message: '收款尚未启用' } }), { status: 503 }));
+    const client = createPaymentClient({ clientId: product.id, apiSecret: product.apiSecret, fetcher });
+    await expect(client.createOrder({ productOrderId: 'same-business-order', sku: 'monthly', returnUrl: 'https://catalog.example/return' }))
+      .rejects.toMatchObject({ code: 'PAYMENTS_DISABLED', status: 503, message: '收款尚未启用' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
 });

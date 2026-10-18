@@ -1,5 +1,6 @@
 import { AlipaySdk } from 'alipay-sdk';
 import { createPrivateKey, createPublicKey } from 'node:crypto';
+import {alipayPaidAt,alipayTimestamp} from './alipay-time';
 
 export type PaymentChannel = 'page' | 'wap';
 export interface AlipayEnvironment {
@@ -98,15 +99,9 @@ function httpsCallback(value: string): string {
   return url.toString();
 }
 
-function paidAt(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return undefined;
-  const date = new Date(`${value.replace(' ', 'T')}+08:00`);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
-}
-
-function alipayTimestamp(milliseconds: number): string {
-  // Workers use UTC; the V2 gateway expects China Standard Time regardless of host TZ.
-  return new Date(milliseconds + 8 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+function queryPaidAt(value:unknown):string|undefined {
+  try {return alipayPaidAt(value);}
+  catch {throw new AlipayError('ALIPAY_INVALID_RESPONSE','Alipay returned an invalid payment time');}
 }
 
 /** RSA2 operations use the official SDK; HTTP transport uses Worker-native fetch. */
@@ -217,6 +212,7 @@ export function createAlipay(env: AlipayEnvironment, fetcher: typeof fetch = glo
         || !['WAIT_BUYER_PAY', 'TRADE_CLOSED', 'TRADE_SUCCESS', 'TRADE_FINISHED'].includes(String(data.trade_status))) {
         throw new AlipayError('ALIPAY_INVALID_RESPONSE');
       }
+      const paymentTime = ['TRADE_SUCCESS','TRADE_FINISHED'].includes(String(data.trade_status)) ? queryPaidAt(data.send_pay_date) : undefined;
       return {
         outTradeNo,
         tradeNo: data.trade_no,
@@ -224,7 +220,7 @@ export function createAlipay(env: AlipayEnvironment, fetcher: typeof fetch = glo
         totalAmount: normalizedAmount(data.total_amount),
         ...(typeof data.seller_id === 'string' ? { sellerId: data.seller_id } : {}),
         ...(typeof data.buyer_user_id === 'string' ? { buyerId: data.buyer_user_id } : {}),
-        ...(paidAt(data.send_pay_date) ? { paidAt: paidAt(data.send_pay_date) } : {}),
+        ...(paymentTime ? { paidAt: paymentTime } : {}),
       };
     },
 

@@ -2,7 +2,7 @@
 
 管理入口：`https://pay.bornforthis.cn/admin`。管理员登录后，可以查看平台、预览并保存单个平台配置、生成 AI 接入任务、查看及撤销短期授权。这里的“平台”和支付 API 中的产品 `clientId` 是同一个隔离单位。
 
-支付宝应用已上线，当前 `PAYMENT_ENABLED=false`，真实小额付款、到账与产品实际开通仍待验收。管理后台可准备产品配置，但注册平台、生成任务或保存商品都不代表已经能够真实收款。
+支付宝应用已上线，2026-10-15 已完成 `xhs-downloader` 一笔 ¥3.00 日付的正式付款、通知送达和实际后端会员开通验收；临时验收关闭后，用户明确授权正式开放，正式配置为 `PAYMENT_ENABLED=true`。实时状态以健康接口或签名目录的 `acceptingPayments` 为准；其他套餐、客户端、手机渠道及退款未据此标记通过。注册平台、生成任务或保存商品不代表该产品已经完成付款与权益验收。
 
 ## 一键交给产品开发 AI
 
@@ -16,6 +16,8 @@
 复制任务属于敏感内容，其中的短期令牌允许读取**该平台**的接入凭证并执行指定新增或更新操作。不要贴到公开 Issue、日志、群聊或源码。它不包含管理员密码、支付宝应用私钥、GitHub Token、其他平台密钥或全账号凭据。
 
 通用 Skill 可在登录后复制或下载：`GET /api/admin/skill`、`GET /api/admin/skill.zip`。拿到复制任务的 AI 也可使用临时 Bearer 授权请求 `GET /api/integration/v1/skill.zip`，解压到任务临时目录使用；不需要管理员 Cookie、额外全局账号授权或自动安装全局 Skill。令牌放在 Authorization 请求头，不能放入 URL/query。
+
+复制任务与 ZIP 均包含付款后客户端同步要求，以及无密钥的 `payment-completion.mjs` 模板：等待实际权益、focus/resume 刷新、账号切换清理和超时恢复。中心已正式开放、目标平台启用且签名目录允许收款时，产品 AI 可在其已授权项目内完成部署并开放购买入口，不必回到支付仓库重复改总开关。单平台授权仍不能改商户或总开关；真实付款由用户人工完成。配置应用、产品后端/网页部署、安装包发布和实际开通必须分别核实。
 
 ## 授权如何限制操作
 
@@ -54,24 +56,24 @@
 
 ## 管理员与加密存储配置
 
-在本机交互终端运行以下流程，邮箱和密码由终端输入，不写进命令历史或明文 JSON 文件：
+以下是默认 Secret 初始化或明确恢复 Secret 类型时的流程，邮箱和密码由本机交互终端输入，不写进命令历史或明文 JSON 文件。**第二条 `secret bulk` 命令会把这 5 项恢复为 Secret 类型，不是当前 Text 维护约定下的日常发布步骤。** 现有 Worker 按 [环境变量说明](environment-variables.md) 维护；修改密码时只更新脚本生成的新哈希及确需变更字段，其他原值和 Text 类型保持不变。
 
 ```sh
 python3 -c 'import getpass,json,sys; print("管理员邮箱：",file=sys.stderr); email=input().strip(); password=getpass.getpass("管理员密码："); json.dump({"email":email,"password":password},sys.stdout)' | node scripts/configure-admin.mjs
 npx wrangler secret bulk secrets/admin-worker-secrets.json
 ```
 
-脚本从标准输入接收 `{email,password}`，密码要求 12–1024 个字符。密码经带 pepper 的 PBKDF2 派生，**明文密码不落盘**；输出仅说明准备完成。被 Git 忽略的 `secrets/admin-worker-secrets.json` 权限为 0600，包含账户邮箱、密码哈希、pepper、会话签名密钥和注册表加密密钥。该文件仍是敏感 Secret 文件，不能打印或提交。
+脚本从标准输入接收 `{email,password}`，密码要求 12–1024 个字符。密码经带 pepper 的 PBKDF2 派生，**明文密码不落盘**；输出仅说明准备完成。被 Git 忽略的 `secrets/admin-worker-secrets.json` 权限为 0600，包含账户邮箱、密码哈希、pepper、会话签名密钥和注册表加密密钥。该文件仍是敏感备份，不能打印或提交。
 
-Secret 名称：`ADMIN_EMAIL`、`ADMIN_PASSWORD_HASH`、`ADMIN_PASSWORD_PEPPER`、`ADMIN_SESSION_SECRET`、`REGISTRY_ENCRYPTION_KEY`。脚本在已有本机配置存在时保留 pepper、会话密钥和注册表加密密钥，修改密码只更新盐及派生哈希。新密码哈希部署后，旧登录会话因凭证指纹不符而失效。
+原 5 项敏感运行变量：`ADMIN_EMAIL`、`ADMIN_PASSWORD_HASH`、`ADMIN_PASSWORD_PEPPER`、`ADMIN_SESSION_SECRET`、`REGISTRY_ENCRYPTION_KEY`。脚本仅在本机对应原字段存在且非空时复用 pepper、会话密钥和注册表加密密钥；字段缺失或为空会生成新值，即使配置文件本身存在也一样。维护现有服务前必须先恢复完整原配置，尤其已有加密注册表时不能上传新生成的加密 key。原 key 齐全且邮箱不变时，修改密码只更新盐及派生哈希。新密码哈希部署后，旧登录会话因凭证指纹不符而失效。
 
 登录使用 Secure、HttpOnly、SameSite=Strict 的主机 Cookie，会话有效期为 8 小时；管理写操作校验同源 Origin 和 CSRF Token。登录与临时接入 API 的限流绑定需随 Worker 配置部署。页面不内置管理员账户或密码。
 
-平台目录、平台长期凭证、授权哈希、计划与审计记录使用 AES-256-GCM 加密后写入私有 GitHub 数据仓库的 `system/clients.enc.json`。`REGISTRY_ENCRYPTION_KEY` 只保留在本机安全备份及 Cloudflare Secret，不能放进该仓库。这里加密的是接入注册表；订单和 outbox 仍按原架构保存，并非所有 GitHub 文件都经过此加密。
+平台目录、平台长期凭证、授权哈希、计划与审计记录使用 AES-256-GCM 加密后写入私有 GitHub 数据仓库的 `system/clients.enc.json`。`REGISTRY_ENCRYPTION_KEY` 只保留在本机安全备份及 Cloudflare 服务端配置，按用户 2026-10-18 的 [Text 维护约定](environment-variables.md) 保留原值，不能放进该数据仓库或代码仓库。这里加密的是接入注册表；订单和 outbox 仍按原架构保存，并非所有 GitHub 文件都经过此加密。
 
 **加密密钥必须保留。** 已有加密注册表时，不要用新生成的随机 key 覆盖旧 key。若本机配置文件丢失，先从安全备份恢复原 key，再运行配置流程；不能靠重新生成密钥恢复旧数据。
 
-仅当 `system/clients.enc.json` 不存在时，服务才读取旧 `CLIENTS_JSON` 作为初始化基线。第一次保存注册表后，加密数据成为权威来源；再修改 legacy Secret 不会覆盖后台配置。加密数据存在但格式错误、损坏、缺少 key 或无法解密时必须报错，**禁止退回旧 Secret 继续运行**，否则会重新启用旧商品或旧凭证。
+仅当 `system/clients.enc.json` 不存在时，服务才读取旧 `CLIENTS_JSON` 作为初始化基线。第一次保存注册表后，加密数据成为权威来源；再修改 legacy 配置不会覆盖后台配置。加密数据存在但格式错误、损坏、缺少 key 或无法解密时必须报错，**禁止退回旧配置继续运行**，否则会重新启用旧商品或旧凭证。
 
 ## 接入与验证边界
 

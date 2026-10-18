@@ -124,6 +124,35 @@ describe('payment order authority and idempotency', () => {
     expect((await f.payments.order(created.id as string)).amount).toBe('9.90');
   });
 
+  it('replays the saved amount, title and hash after catalog repricing without changing new-order pricing', async () => {
+    const f = fixture();
+    const original = await f.create();
+    const before = await f.payments.order(String(original.id));
+    const changed = { ...client, skus: { ...client.skus, pro: { subject: 'New title', amount: '15.00' } } };
+    const replay = await f.payments.create(changed, { productOrderId: 'product-order-1', sku: 'pro', returnUrl: 'https://brclio.com/account' });
+    expect(replay).toMatchObject({ id: original.id, amount: '9.90', subject: 'Brclio Pro' });
+    expect(await f.payments.order(String(original.id))).toEqual(before);
+    expect(f.store.commits).toHaveLength(1);
+    const fresh = await f.payments.create(changed, { productOrderId: 'product-order-2', sku: 'pro', returnUrl: 'https://brclio.com/account' });
+    expect(fresh).toMatchObject({ amount: '15.00', subject: 'New title' });
+    expect(fresh.id).not.toBe(original.id);
+  });
+
+  it('replays an existing SKU snapshot after sale stops or the SKU is removed, while rejecting new orders', async () => {
+    const f = fixture();
+    const original = await f.create();
+    const catalogs:ProductClient[] = [
+      { ...client, skus: { ...client.skus, pro: { subject: 'Stopped', amount: '15.00', enabled: false } } },
+      { ...client, skus: { annual: client.skus.annual } },
+    ];
+    for (const changed of catalogs) {
+      expect(await f.payments.create(changed, { productOrderId: 'product-order-1', sku: 'pro', returnUrl: 'https://brclio.com/account' })).toMatchObject({ id: original.id, amount: '9.90' });
+      await expect(f.payments.create(changed, { productOrderId: 'new-business-order', sku: 'pro', returnUrl: 'https://brclio.com/account' })).rejects.toMatchObject({ code: Object.hasOwn(changed.skus, 'pro') ? 'SKU_DISABLED' : 'INVALID_REQUEST' });
+      await expect(f.payments.create(changed, { productOrderId: 'product-order-1', sku: 'annual', returnUrl: 'https://brclio.com/account' })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    }
+    expect(f.store.commits).toHaveLength(1);
+  });
+
   it('does not reuse a live business-order index after switching to sandbox', async () => {
     const f = fixture();
     await f.create();
@@ -196,6 +225,40 @@ describe('verified payment transitions and atomic outbox', () => {
     await expect(f.payments.notification(f.notify(id, { trade_no: '2026101322001462921099999999' }))).rejects.toMatchObject({ code: 'PAYMENT_MISMATCH' });
     expect((await f.payments.order(id)).tradeNo).toBe('2026101322001462921037601726');
   });
+
+  it('keeps verified Shanghai payment time separate from a delayed notification and never rewrites it on replay', async () => {
+    const f = fixture();
+    const id = String((await f.create()).id);
+    f.setNow(START + 24 * 3600_000);
+    const paid = await f.payments.notification(f.notify(id, { gmt_payment: '2026-10-13 23:59:00' }));
+    expect(paid?.paidAt).toBe('2026-10-13T15:59:00.000Z');
+    const event = await f.store.readJson<Delivery>(`events/evt_${id}.json`);
+    expect(event?.event).toMatchObject({ createdAt: new Date(START + 24 * 3600_000).toISOString(), data: { paidAt: paid?.paidAt } });
+    await f.payments.notification(f.notify(id, { gmt_payment: '2026-10-14 16:00:00' }));
+    expect((await f.payments.order(id)).paidAt).toBe(paid?.paidAt);
+    expect(await f.store.readJson(`events/evt_${id}.json`)).toEqual(event);
+    expect(f.store.commits).toHaveLength(2);
+  });
+
+  it.each(['not-a-time', '', '2026-02-30 12:00:00', '2026-10-13 24:00:00', '2026-10-14 00:00:00'])('rejects an explicitly invalid or future signed payment timestamp: %j', async gmt_payment => {
+    const f = fixture();
+    const id = String((await f.create()).id);
+    await expect(f.payments.notification(f.notify(id, { gmt_payment }))).rejects.toMatchObject({ code: 'PAYMENT_MISMATCH' });
+    expect((await f.payments.order(id)).status).toBe('PENDING');
+    expect(await f.store.readJson(`events/evt_${id}.json`)).toBeNull();
+    expect(f.store.commits).toHaveLength(1);
+  });
+
+  it('uses first confirmation time only when the provider payment timestamp is absent', async () => {
+    const f = fixture();
+    const id = String((await f.create()).id);
+    f.setNow(START + 3600_000);
+    const paid = await f.payments.notification(f.notify(id));
+    expect(paid?.paidAt).toBe(new Date(START + 3600_000).toISOString());
+    f.setNow(START + 7200_000);
+    await f.payments.notification(f.notify(id));
+    expect((await f.payments.order(id)).paidAt).toBe(paid?.paidAt);
+  });
 });
 
 describe('reconciliation and durable delivery', () => {
@@ -228,6 +291,24 @@ describe('reconciliation and durable delivery', () => {
     f.query.mockResolvedValue(trade);
     expect((await f.payments.refresh(id)).status).toBe('PAID');
     expect(await f.store.readJson<Delivery>(`events/evt_${id}.json`)).toMatchObject({ attempts: 0, event: { data: { orderId: id, amount: '9.90' } } });
+  });
+
+  it('uses a verified query payment timestamp instead of the later reconciliation time', async () => {
+    const f = fixture();
+    const id = String((await f.create()).id), paidAt = new Date(START + 60_000).toISOString();
+    f.setNow(START + 24 * 3600_000);
+    f.query.mockResolvedValue({ outTradeNo: id, tradeNo: '2026101322001462921037601726', tradeStatus: 'TRADE_SUCCESS', totalAmount: '9.90', sellerId: f.env.ALIPAY_SELLER_ID, paidAt });
+    expect(await f.payments.refresh(id)).toMatchObject({ status: 'PAID', paidAt });
+    expect(await f.store.readJson<Delivery>(`events/evt_${id}.json`)).toMatchObject({ event: { createdAt: new Date(START + 24 * 3600_000).toISOString(), data: { paidAt } } });
+  });
+
+  it.each(['2026-02-30T12:00:00.000Z', '2026-10-14T08:00:00.000Z', 'invalid'])('does not confirm an invalid query payment timestamp: %j', async paidAt => {
+    const f = fixture();
+    const id = String((await f.create()).id);
+    f.query.mockResolvedValue({ outTradeNo: id, tradeNo: '2026101322001462921037601726', tradeStatus: 'TRADE_SUCCESS', totalAmount: '9.90', paidAt });
+    await expect(f.payments.refresh(id)).rejects.toMatchObject({ code: 'PAYMENT_MISMATCH' });
+    expect((await f.payments.order(id)).status).toBe('PENDING');
+    expect(await f.store.readJson(`events/evt_${id}.json`)).toBeNull();
   });
 
   it('keeps redirected notifications pending without forwarding their signed payload',async()=>{

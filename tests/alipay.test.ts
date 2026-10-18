@@ -84,6 +84,21 @@ describe('official Alipay SDK RSA2 adapter', () => {
     }
   });
 
+  it.each(['not-a-time', '', null, '2026-02-30 12:00:00', '2026-10-13 24:00:00'])('rejects a present invalid signed query payment date: %j', async send_pay_date => {
+    await expect(createAlipay(env, transport(signedEnvelope({ ...trade, send_pay_date }))).query('pay_test')).rejects.toMatchObject({ code: 'ALIPAY_INVALID_RESPONSE' });
+  });
+
+  it('retains compatibility with a verified response without a payment date', async () => {
+    const { send_pay_date: _unused, ...withoutPaymentDate } = trade;
+    expect(await createAlipay(env, transport(signedEnvelope(withoutPaymentDate))).query('pay_test')).toMatchObject({ tradeStatus: 'TRADE_SUCCESS' });
+    expect(await createAlipay(env, transport(signedEnvelope(withoutPaymentDate))).query('pay_test')).not.toHaveProperty('paidAt');
+  });
+
+  it.each(['WAIT_BUYER_PAY','TRADE_CLOSED'])('does not interpret an empty payment date for an unpaid query: %s', async trade_status => {
+    const result=await createAlipay(env,transport(signedEnvelope({...trade,trade_status,send_pay_date:''}))).query('pay_test');
+    expect(result).toMatchObject({tradeStatus:trade_status});expect(result).not.toHaveProperty('paidAt');
+  });
+
   it('produces signed desktop and mobile payment URLs with official product codes', () => {
     const alipay = createAlipay(env);
     const expiresAt = new Date(Date.now() + 120_000).toISOString();

@@ -39,10 +39,10 @@
 1. 在可信的本地环境使用支付宝密钥工具或 OpenSSL 生成 RSA 密钥对，使用至少 2048 位密钥。
 2. 只把**应用公钥**提交到支付宝应用的接口加签设置。
 3. 保存该应用对应的**支付宝公钥**，供服务端验证通知及查单返回。
-4. 把**应用私钥**和**支付宝公钥**分别配置为 Worker 的 `ALIPAY_PRIVATE_KEY`、`ALIPAY_PUBLIC_KEY` Secret。使用 PEM 格式，并保留正确的换行。
+4. 把**应用私钥**和**支付宝公钥**分别配置为 Worker 的 `ALIPAY_PRIVATE_KEY`、`ALIPAY_PUBLIC_KEY` 运行时变量。按用户 2026-10-18 的 [Text 维护约定](environment-variables.md) 保留原值，使用 PEM 格式并保留正确换行；已有正式应用不重新生成密钥。
 5. 确认 `ALIPAY_SELLER_ID` 是该应用实际收款账号的支付宝用户 ID / PID；它不是 AppID。
 
-应用公钥用于支付宝验证商户请求；支付宝公钥用于商户验证支付宝返回。不要把两者混用。私钥不得进入源码、GitHub 数据仓库、网页或移动客户端；请通过本地安全文件及部署平台 Secret 保存。
+应用公钥用于支付宝验证商户请求；支付宝公钥用于商户验证支付宝返回。不要把两者混用。私钥不得进入源码、GitHub 数据仓库、网页或移动客户端；仅保留本机受限备份和 Cloudflare Worker 服务端配置，控制台显示方式以 [环境变量说明](environment-variables.md) 为准。
 
 支付宝官方 SDK 推荐证书模式，但首版没有实现证书序列号及证书链配置。如果当前应用已经使用证书模式，应先扩展并验证证书模式支持，不能仅把证书内容填入普通公钥字段，也不要擅自替换已经在用的应用密钥。
 
@@ -56,13 +56,13 @@
 - `GITHUB_BRANCH`：已存在的分支，默认 `main`。仓库需要已有初始提交。
 - `GITHUB_TOKEN`：仅授权该数据仓库的细粒度令牌，具备 Contents 读写权限。Worker 需要创建 Git 对象、提交并更新该分支引用。
 
-目标分支须允许该令牌完成正常的非强制更新。数据仓库不要与公开源码仓库共用，也不要在其中存放应用私钥、产品 API Secret 或 webhook Secret。
+目标分支须允许该令牌完成正常的非强制更新。数据仓库不要与公开源码仓库共用，不得在其中存放应用私钥，也不得明文保存产品 API Secret 或 webhook Secret；产品长期凭据仅由现有 AES-256-GCM 加密注册表保存。
 
 GitHub 方案适合低交易量自营产品。每次订单创建或状态更新会产生提交，并消耗多次 GitHub REST 请求。订单数量增长后必须评估速率限制、延迟、提交历史及队列规模；它不适合作为高并发支付数据库。详见 [架构与边界](./architecture.md)。
 
 ## 4. 配置 Worker
 
-配置定义以 `src/types.ts` 和 `wrangler.jsonc` 为准。初始配置关闭收款：`PAYMENT_ENABLED=false`，渠道为 `page,wap`。
+配置定义以 `src/types.ts` 和 `wrangler.jsonc` 为准。首次未完成验收时关闭收款：`PAYMENT_ENABLED=false`；现有正式服务经此前用户授权为 `true`，维护时保留。渠道为 `page,wap`。当前 Text 类型、变量生成方式及发布保留规则见 [环境变量说明](environment-variables.md)。
 
 | 配置 | 用途 |
 | --- | --- |
@@ -71,16 +71,16 @@ GitHub 方案适合低交易量自营产品。每次订单创建或状态更新�
 | `PAYMENT_ENABLED` | 收款开关；完成配置和验证前保持 `false` |
 | `ALIPAY_CHANNELS` | 允许渠道，当前 `page,wap` |
 | `ALIPAY_APP_ID` | 正式应用为 `2021007109602288`；沙箱使用沙箱 AppID |
-| `ALIPAY_PRIVATE_KEY` | 应用私钥，Secret |
-| `ALIPAY_PUBLIC_KEY` | 支付宝公钥，Secret |
+| `ALIPAY_PRIVATE_KEY` | 应用私钥，敏感运行时变量 |
+| `ALIPAY_PUBLIC_KEY` | 支付宝公钥，运行时验签配置 |
 | `ALIPAY_SELLER_ID` | 实际收款账号 PID，用于业务核对 |
 | `ALIPAY_GATEWAY` | 可选网关覆盖；仅使用对应环境的官方 HTTPS 网关 |
 | `GITHUB_REPOSITORY` / `GITHUB_BRANCH` | 私有数据仓库和分支 |
-| `GITHUB_TOKEN` | 数据仓库访问令牌，Secret |
-| `CHECKOUT_SECRET` | 支付页面令牌签名 Secret，与产品 Secret 分开 |
-| `CLIENTS_JSON` | 已登记产品、服务端凭证、固定 SKU、回跳来源和 webhook 配置，Secret |
+| `GITHUB_TOKEN` | 数据仓库访问令牌，敏感运行时变量 |
+| `CHECKOUT_SECRET` | 支付页面令牌签名密钥，与产品长期密钥分开 |
+| `CLIENTS_JSON` | legacy 产品配置及凭据，仅加密注册表不存在时初始化 |
 
-通过 Wrangler 的 Secret 输入功能配置敏感值，例如 `npx wrangler secret put ALIPAY_PRIVATE_KEY`。不要将真实值作为命令行参数、提交到配置文件或打印到日志。`CLIENTS_JSON` 中每个产品至少包含 `id`、`name`、`apiSecret`、`webhookSecret`、`webhookUrl`、`returnOrigins` 和 `skus`，字段结构以 `ProductClient` 类型为准。
+当前 Worker 按 [Text 维护约定](environment-variables.md) 在原控制台配置中以同名同值维护。Wrangler Secret 输入功能仍可供首次采用 Secret 管理或明确恢复 Secret 类型时使用，例如 `npx wrangler secret put ALIPAY_PRIVATE_KEY`；此命令会恢复对应变量的 Secret 类型，不是当前 Text 维护下的日常发布步骤。不要将真实值作为命令行参数、提交到配置文件或打印到日志。legacy `CLIENTS_JSON` 中每个产品至少包含 `id`、`name`、`apiSecret`、`webhookSecret`、`webhookUrl`、`returnOrigins` 和 `skus`，字段结构以 `ProductClient` 类型为准；已有加密注册表时通过后台更新，不能用旧配置覆盖。
 
 每个 SKU 包含服务端固定的 `subject` 和两位小数字符串 `amount`。产品前端不提交可被直接采用的付款金额。每个产品使用独立 API 和 webhook Secret，并登记实际 HTTPS webhook 与允许的回跳 origin；新增子域名须加入该产品配置。
 

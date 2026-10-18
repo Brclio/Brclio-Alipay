@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {fetch,ProxyAgent} from 'undici';
+import {loadDeploymentExpectations} from './deployment-preflight.mjs';
 
 let dispatcher;
 const checks={};
@@ -49,7 +50,9 @@ try {
   checks.skillHasNoPassword=!new TextDecoder().decode(bytes).includes(input.password);
   const health=await call('/api/health');
   const status=await health.json();
-  checks.paymentSwitchOff=health.status===200 && status.version==='0.3.0' && status.acceptingPayments===false;
+  const expected=loadDeploymentExpectations();
+  checks.paymentConfigurationMatches=health.status===200 && status.version===expected.version && status.mode===expected.paymentMode
+    && status.acceptingPayments===expected.paymentEnabled && (!expected.paymentEnabled || status.ready===true);
   const logout=await call('/api/admin/logout',{method:'POST',headers:{...headers,Origin:base.origin,'X-CSRF-Token':identity.csrfToken}});
   checks.logout=logout.status===200 && logout.headers.get('Set-Cookie')?.includes('Max-Age=0');
   await logout.body?.cancel();

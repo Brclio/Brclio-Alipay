@@ -34,11 +34,15 @@ describe('portable skill delivery', () => {
     execFileSync('unzip', ['-q', archive, '-d', path.join(directory, 'unpacked')], { stdio: 'pipe' });
     const base = path.join(directory, 'unpacked/brclio-pay-integrate');
     expect(await readFile(path.join(base, 'SKILL.md'), 'utf8')).toBe(skillMarkdown());
-    for (const file of ['references/integration.md', 'scripts/inspect-platform.mjs', 'scripts/integration-client.mjs', 'assets/payment-client.mjs', 'assets/webhook-handler.mjs']) {
+    for (const file of ['references/integration.md', 'scripts/inspect-platform.mjs', 'scripts/integration-client.mjs', 'assets/payment-client.mjs', 'assets/webhook-handler.mjs', 'assets/payment-completion.mjs']) {
       expect(await readFile(path.join(base, file), 'utf8')).toBe(await readFile(new NodeURL('../skills/brclio-pay-integrate/' + file, import.meta.url), 'utf8'));
     }
     expect(await readFile(path.join(base, 'assets/payment-client.mjs'), 'utf8')).toBe(await readFile(new NodeURL('../examples/payment-client.mjs', import.meta.url), 'utf8'));
     expect(await readFile(path.join(base, 'assets/webhook-handler.mjs'), 'utf8')).toBe(await readFile(new NodeURL('../examples/webhook-handler.mjs', import.meta.url), 'utf8'));
+    const completion = path.join(base, 'assets/payment-completion.mjs');
+    expect(await readFile(completion, 'utf8')).toBe(await readFile(new NodeURL('../examples/payment-completion.mjs', import.meta.url), 'utf8'));
+    // The downloaded bundle supplies a working, client-safe module, not only instructions.
+    expect(typeof (await import(new NodeURL('file://' + completion).href)).createPaymentCompletionWatcher).toBe('function');
   });
 
   it('puts the scoped token only into its requested per-task prompt', () => {

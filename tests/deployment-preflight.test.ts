@@ -9,6 +9,11 @@ afterEach(async () => { await Promise.all(temporary.splice(0).map(folder => rm(f
 const source = () => import(new URL('../scripts/deployment-preflight.mjs', import.meta.url).href);
 const html = '<!doctype html><form id="loginForm"></form><script src="/admin.js" defer></script>';
 const javascript = 'document.getElementById("loginForm");';
+const secureHeaders = {
+  'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Strict-Transport-Security': 'max-age=31536000',
+};
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const expected = (paymentEnabled = false) => ({ version: '0.3.0', paymentMode: 'live', paymentEnabled,
   workerUrl: 'https://worker.example', publicUrl: 'https://pay.example', adminPageHash: digest(html), adminScriptHash: digest(javascript) });
@@ -121,6 +126,33 @@ describe('read-only deployment verification', () => {
     await expect(runDeploymentPreflight({ expected: { ...expected(), workerUrl: 'http://worker.example' }, fetcher })).rejects.toThrow();
     await expect(runDeploymentPreflight({ expected: expected(), fetcher, attempts: 4 })).rejects.toThrow();
   });
+
+  it('verifies direct static bytes, MIME, security and freshness while checkout capabilities remain required', async () => {
+    const { runDeploymentPreflight } = await source();
+    const configured = { ...expected(), checkoutPageHash: digest(html), publicAssets: {
+      '/checkout.js': { hash: digest(javascript), type: 'js' }, '/styles.css': { hash: digest('body{}'), type: 'css' },
+    } };
+    const fetcher = async (url: URL) => {
+      if (url.pathname.startsWith('/api/checkout/')) return new Response('{}', { status: 401 });
+      if (url.pathname.startsWith('/checkout/')) return new Response(html, { headers: { ...secureHeaders, 'Content-Type': 'text/html' } });
+      if (url.pathname === '/checkout.js') return new Response(javascript, { headers: { ...secureHeaders, 'Content-Type': 'application/javascript' } });
+      if (url.pathname === '/styles.css') return new Response('body{}', { headers: { ...secureHeaders, 'Content-Type': 'text/css' } });
+      return response(url);
+    };
+    const good = await runDeploymentPreflight({ expected: configured, fetcher, attempts: 1 });
+    expect(good.deploymentPreflight).toBe(true);
+    for (const change of ['bytes', 'mime', 'headers', 'checkout-auth']) {
+      const bad = await runDeploymentPreflight({ expected: configured, attempts: 1, fetcher: async (url: URL) => {
+        if (change === 'checkout-auth' && url.pathname.startsWith('/api/checkout/')) return new Response('{}');
+        if (url.pathname === '/checkout.js') return new Response(change === 'bytes' ? 'stale' : javascript, {
+          headers: { ...(change === 'headers' ? {} : secureHeaders), 'Content-Type': change === 'mime' ? 'text/html' : 'application/javascript' },
+        });
+        return fetcher(url);
+      } });
+      expect(bad.deploymentPreflight).toBe(false);
+    }
+    await expect(runDeploymentPreflight({ expected: { ...configured, publicAssets: { '/api/private.js': { hash: digest(javascript), type: 'js' } } }, fetcher })).rejects.toThrow();
+  });
 });
 
 describe('deployment expectation loading', () => {
@@ -132,9 +164,12 @@ describe('deployment expectation loading', () => {
     await writeFile(path.join(root, 'wrangler.jsonc'), '// Deployment configuration\n{"vars":{"PAY_BASE_URL":"https://pay.example", "PAYMENT_MODE":"sandbox", "PAYMENT_ENABLED":"true",},}');
     await writeFile(path.join(root, 'public/admin.html'), html);
     await writeFile(path.join(root, 'public/admin.js'), javascript);
+    await writeFile(path.join(root, 'public/checkout.html'), html);
+    for (const name of ['styles.css', 'admin.css', 'checkout.js', 'landing.js']) await writeFile(path.join(root, 'public', name), name.endsWith('.css') ? 'body{}' : javascript);
     expect(loadDeploymentExpectations(root)).toMatchObject({ version: '1.2.3', paymentMode: 'sandbox', paymentEnabled: true,
       publicUrl: 'https://pay.example', workerUrl: 'https://brclio-pay.brclio-xhs.workers.dev',
       adminPageHash: digest(html), adminScriptHash: digest(javascript) });
+    expect(loadDeploymentExpectations(root).publicAssets['/styles.css']).toEqual({ hash: digest('body{}'), type: 'css' });
     await writeFile(path.join(root, 'wrangler.jsonc'), '{"vars":{"PAY_BASE_URL":"https://pay.example","PAYMENT_MODE":"live","PAYMENT_ENABLED":"not-boolean"}}');
     expect(() => loadDeploymentExpectations(root)).toThrow();
   });

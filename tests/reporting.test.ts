@@ -59,6 +59,19 @@ describe('atomic payment reporting',()=>{
     await f.pay(String(id));await f.payments.applyTrade({outTradeNo:String(id),tradeNo:'2026101322001400000000000001',tradeStatus:'TRADE_CLOSED',totalAmount:'9.90'});
     expect(await f.report.summary({month:'2026-10'})).toMatchObject({pendingCount:0,closedCount:0,paidCount:1,paidAmountCents:990});
   });
+  it('attributes a delayed receipt to the verified Shanghai payment day and month exactly once',async()=>{
+    const f=fixture();f.setNow(Date.UTC(2026,9,31,15,50));const {id}=await f.create();
+    const paidAt='2026-10-31T15:59:00.000Z';f.setNow(Date.UTC(2026,9,31,16,1));
+    const trade={outTradeNo:String(id),tradeNo:'2026101322001400000000000001',tradeStatus:'TRADE_SUCCESS',totalAmount:'9.90',paidAt};
+    await f.payments.applyTrade(trade);
+    await f.payments.applyTrade({...trade,paidAt:'2026-10-31T16:01:00.000Z'});
+    const october=await f.report.summary({month:'2026-10'});
+    expect(october).toMatchObject({pendingCount:0,paidCount:1,paidAmountCents:990,allTime:{paidCount:1,paidAmountCents:990}});
+    expect(october.daily[30]).toEqual({date:'2026-10-31',paidCount:1,paidAmountCents:990});
+    expect(await f.report.summary({month:'2026-11'})).toMatchObject({paidCount:0,paidAmountCents:0});
+    expect(await f.payments.order(String(id))).toMatchObject({paidAt});expect(f.store.commits).toHaveLength(2);
+    expect(await f.store.readJson(`events/evt_${id}.json`)).toMatchObject({event:{createdAt:'2026-10-31T16:01:00.000Z',data:{paidAt}}});
+  });
   it('keeps original paid amounts after catalog repricing and adds money in integer cents',async()=>{
     const f=fixture();const cheap={...client,skus:{pro:{subject:'Old',amount:'0.01'}}},expensive={...client,skus:{pro:{subject:'New',amount:'999999.99'}}};
     const old=await f.create('old',cheap);await f.pay(String(old.id),'0.01');

@@ -8,12 +8,13 @@
   "alias": {"node:util": "./src/safe-node-util.ts"},
   "workers_dev": true,
   "preview_urls": false,
-  "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": true},
+  "keep_vars": true,
+  "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": ["/*", "!/styles.css", "!/admin.css", "!/admin.js", "!/checkout.js", "!/landing.js"]},
   "vars": {
     "PAY_BASE_URL": "https://pay.bornforthis.cn",
     "ALIPAY_APP_ID": "2021007109602288",
     "PAYMENT_MODE": "live",
-    "PAYMENT_ENABLED": "false",
+    "PAYMENT_ENABLED": "true",
     "ALIPAY_CHANNELS": "page,wap",
     "GITHUB_REPOSITORY": "BrclioData/Brclio-Alipay-Data",
     "GITHUB_BRANCH": "main"

@@ -3,6 +3,7 @@ import {allowedReturn,money,requireThat} from './config';
 import {sha256,hmacSha256,randomId} from './crypto';
 import {checkoutToken} from './auth';
 import {indexOrder} from './reporting';
+import {alipayPaidAt} from './alipay-time';
 export interface Trade {
   outTradeNo: string; tradeNo: string; tradeStatus: string; totalAmount: string; sellerId?: string; paidAt?: string;
 }
@@ -11,6 +12,15 @@ const orderPath = (id:string) => `orders/${id}.json`;
 const eventId = (id:string) => `evt_${id}`;
 const deliveryPath = (id:string) => `events/${id}.json`;
 const emptyQueue = ():WorkQueue => ({orders:[],deliveries:[]});
+function confirmedPaidAt(value:unknown,now:number):string {
+  // Older/provider responses without a payment time keep the original receipt
+  // time contract. Never replace an explicitly supplied invalid timestamp.
+  if(value===undefined)return new Date(now).toISOString();
+  requireThat(typeof value==='string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value),400,'PAYMENT_MISMATCH','支付宝付款时间无效');
+  const time=Date.parse(value);
+  requireThat(Number.isFinite(time) && new Date(time).toISOString().slice(0,19)===value.slice(0,19) && time<=now+300_000,400,'PAYMENT_MISMATCH','支付宝付款时间无效');
+  return new Date(time).toISOString();
+}
 export class Payments {
   constructor(public env:Env,public store:Store,public gateway:Gateway,public now:()=>number=Date.now,public send:typeof fetch=(input,init)=>globalThis.fetch(input,init)) {}
   async order(id:string):Promise<Order> {
@@ -24,10 +34,8 @@ export class Payments {
     requireThat(body && typeof body === 'object' && !Array.isArray(body),400,'INVALID_REQUEST','订单参数错误');
     const input = body as Record<string,unknown>;
     requireThat(Object.keys(input).every(k=>['productOrderId','sku','returnUrl'].includes(k)),400,'INVALID_REQUEST','仅允许 productOrderId、sku、returnUrl');
-    requireThat(typeof input.productOrderId === 'string' && /^[a-zA-Z0-9_.:-]{1,100}$/.test(input.productOrderId) && typeof input.sku === 'string' && Object.hasOwn(client.skus,input.sku) && typeof input.returnUrl === 'string' && input.returnUrl.length <= 2000,400,'INVALID_REQUEST','业务订单或商品参数错误');
-    const item = client.skus[input.sku];
+    requireThat(typeof input.productOrderId === 'string' && /^[a-zA-Z0-9_.:-]{1,100}$/.test(input.productOrderId) && typeof input.sku === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input.sku) && typeof input.returnUrl === 'string' && input.returnUrl.length <= 2000,400,'INVALID_REQUEST','业务订单或商品参数错误');
     const returnUrl = allowedReturn(input.returnUrl,client.returnOrigins);
-    const requestHash = sha256(JSON.stringify({productOrderId:input.productOrderId,sku:input.sku,returnUrl,amount:item.amount,subject:item.subject}));
     const index = `indexes/${client.id}/${sha256(input.productOrderId)}.json`;
     const id = randomId('pay_');
     const now = this.now();
@@ -36,11 +44,17 @@ export class Payments {
       if (existing) {
         const previous = await tx.read<Order>(orderPath(existing.id));
         requireThat(previous?.mode===this.env.PAYMENT_MODE,409,'ENVIRONMENT_MISMATCH','订单不属于当前支付环境');
-        requireThat(previous && previous.requestHash === requestHash,409,'IDEMPOTENCY_CONFLICT','相同业务订单号不能修改商品、金额或返回地址');
+        // Compare the retry with the saved purchase, not today's mutable SKU.
+        // Reconstruct the old hash so previously persisted orders remain valid.
+        const replayHash=previous && sha256(JSON.stringify({productOrderId:input.productOrderId,sku:input.sku,returnUrl,amount:previous.amount,subject:previous.subject}));
+        requireThat(previous && previous.clientId===client.id && previous.productOrderId===input.productOrderId && previous.sku===input.sku && previous.returnUrl===returnUrl && previous.requestHash===replayHash,409,'IDEMPOTENCY_CONFLICT','相同业务订单号不能修改商品或返回地址');
         await indexOrder(tx,previous);
         return previous;
       }
+      requireThat(Object.hasOwn(client.skus,input.sku as string),400,'INVALID_REQUEST','业务订单或商品参数错误');
+      const item=client.skus[input.sku as string];
       requireThat(item.enabled!==false,403,'SKU_DISABLED','该商品已停售');
+      const requestHash=sha256(JSON.stringify({productOrderId:input.productOrderId,sku:input.sku,returnUrl,amount:item.amount,subject:item.subject}));
       const queue = await tx.read<WorkQueue>('system/queue.json') || emptyQueue();
       requireThat(queue.orders.length < 2000,503,'CAPACITY','待支付订单过多，请稍后再试');
       const created:Order = {id,mode:this.env.PAYMENT_MODE,clientId:client.id,productOrderId:input.productOrderId as string,sku:input.sku as string,subject:item.subject,amount:money(item.amount),status:'PENDING',createdAt:new Date(now).toISOString(),expiresAt:new Date(now+30*60_000).toISOString(),returnUrl,requestHash,fulfillmentStatus:'pending'};
@@ -58,7 +72,7 @@ export class Payments {
     const url = new URL(order.returnUrl); url.searchParams.set('payment_order_id',order.id); url.searchParams.set('product_order_id',order.productOrderId); return url.toString();
   }
   async applyTrade(trade:Trade):Promise<Order> {
-    const now = new Date(this.now()).toISOString();
+    const observedAt=this.now(),now = new Date(observedAt).toISOString();
     return this.store.transaction(async tx => {
       const order = await tx.read<Order>(orderPath(trade.outTradeNo));
       requireThat(order,404,'NOT_FOUND','订单不存在');
@@ -68,9 +82,10 @@ export class Payments {
       if (order.status === 'PAID') {await indexOrder(tx,order);return order;}
       if (['TRADE_SUCCESS','TRADE_FINISHED'].includes(trade.tradeStatus)) {
         requireThat(/^\d{10,64}$/.test(trade.tradeNo),400,'PAYMENT_MISMATCH','支付宝交易号无效');
-        order.status='PAID'; order.tradeNo=trade.tradeNo; order.paidAt=now;
+        const paidAt=confirmedPaidAt(trade.paidAt,observedAt);
+        order.status='PAID'; order.tradeNo=trade.tradeNo; order.paidAt=paidAt;
         const id = eventId(order.id);
-        const delivery:Delivery = {event:{id,type:'payment.paid',mode:order.mode,createdAt:now,data:{orderId:order.id,productOrderId:order.productOrderId,clientId:order.clientId,sku:order.sku,amount:order.amount,currency:'CNY',tradeNo:trade.tradeNo,paidAt:now}},attempts:0,nextAttemptAt:now};
+        const delivery:Delivery = {event:{id,type:'payment.paid',mode:order.mode,createdAt:now,data:{orderId:order.id,productOrderId:order.productOrderId,clientId:order.clientId,sku:order.sku,amount:order.amount,currency:'CNY',tradeNo:trade.tradeNo,paidAt}},attempts:0,nextAttemptAt:now};
         tx.put(deliveryPath(id),delivery);
         const queue = await tx.read<WorkQueue>('system/queue.json') || emptyQueue();
         queue.orders=queue.orders.filter(x=>x!==order.id);
@@ -92,7 +107,11 @@ export class Payments {
     const order = await this.order(data.out_trade_no);
     requireThat(money(data.total_amount)===order.amount,400,'PAYMENT_MISMATCH','交易金额不匹配');
     if (!['TRADE_SUCCESS','TRADE_FINISHED','TRADE_CLOSED'].includes(data.trade_status)) return null;
-    return this.applyTrade({outTradeNo:data.out_trade_no,tradeNo:data.trade_no,tradeStatus:data.trade_status,totalAmount:data.total_amount,sellerId:data.seller_id});
+    let paidAt:string|undefined;
+    if(order.status!=='PAID' && ['TRADE_SUCCESS','TRADE_FINISHED'].includes(data.trade_status)) {
+      try {paidAt=alipayPaidAt(data.gmt_payment);}catch {requireThat(false,400,'PAYMENT_MISMATCH','支付宝付款时间无效');}
+    }
+    return this.applyTrade({outTradeNo:data.out_trade_no,tradeNo:data.trade_no,tradeStatus:data.trade_status,totalAmount:data.total_amount,sellerId:data.seller_id,...(paidAt?{paidAt}:{})});
   }
   async refresh(id:string):Promise<Order> {
     const now = this.now();

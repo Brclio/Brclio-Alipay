@@ -104,7 +104,7 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
       const raw=await readBody(request);requireThat(raw==='',400,'INVALID_REQUEST','目录接口不接受请求体');
       const client=authenticate(request,raw,env);
       const skus=Object.fromEntries(Object.entries(client.skus).sort(([a],[b])=>a.localeCompare(b)).map(([sku,item])=>[sku,{...item,enabled:item.enabled!==false}]));
-      return secure(json({clientId:client.id,name:client.name,enabled:client.enabled!==false,mode:env.PAYMENT_MODE,currency:'CNY',version:sha256(JSON.stringify(skus)),skus}));
+      return secure(json({clientId:client.id,name:client.name,enabled:client.enabled!==false,acceptingPayments:env.PAYMENT_ENABLED==='true' && client.enabled!==false,mode:env.PAYMENT_MODE,currency:'CNY',version:sha256(JSON.stringify(skus)),skus}));
     }
     if (path==='/api/alipay/notify' && request.method==='POST') {
       requireThat(request.headers.get('Content-Type')?.split(';')[0].trim()==='application/x-www-form-urlencoded',415,'INVALID_CONTENT_TYPE','通知类型错误');

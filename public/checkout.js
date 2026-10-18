@@ -7,6 +7,7 @@
     'amountLabel', 'orderAmount', 'orderId', 'orderExpiry', 'copyOrder', 'copyFeedback',
     'statusBadge', 'statusTitle', 'statusCopy', 'paymentOptions', 'payButton',
     'refreshButton', 'returnLink', 'pollNote', 'errorNotice', 'sandboxNotice',
+    'autoReturnNotice', 'autoReturnCopy', 'stayButton',
   ].map((id) => [id, byId(id)]));
 
   const route = window.location.pathname.match(/^\/checkout\/([^/]+)\/?$/);
@@ -36,6 +37,19 @@
   let cooldownTimer = null;
   let redirecting = false;
   let pageActive = true;
+  let pageEpoch = 0;
+  let activeRequest = null;
+  let watchPhase = '';
+  let watchUntil = 0;
+  let automaticChecks = 0;
+  let lastReadAt = -Infinity;
+  let returnTimer = null;
+  let returnDeadline = null;
+  let returnCancelled = false;
+  const POLL_INTERVAL = 15000;
+  const WATCH_WINDOW = 10 * 60 * 1000;
+  const MAX_AUTOMATIC_CHECKS = 40;
+  const RETURN_DELAY = 5000;
 
   class ApiError extends Error {
     constructor(status, code, message) {
@@ -51,7 +65,7 @@
   if (defaultChannel) defaultChannel.checked = true;
 
   function safeHttpsUrl(value) {
-    if (typeof value !== 'string') return null;
+    if (typeof value !== 'string' || /[\s\x00-\x1f\x7f]/.test(value)) return null;
     try {
       const url = new URL(value);
       return url.protocol === 'https:' && !url.username && !url.password ? url : null;
@@ -79,14 +93,68 @@
   }
 
   function stopPolling() {
-    if (pollTimer !== null) window.clearInterval(pollTimer);
+    if (pollTimer !== null) window.clearTimeout(pollTimer);
     pollTimer = null;
+  }
+
+  function needsPolling() {
+    return order?.status === 'PENDING' || (order?.status === 'PAID' && order.fulfillmentStatus === 'pending');
+  }
+
+  function resetWatch() {
+    automaticChecks = 0;
+    watchUntil = Date.now() + WATCH_WINDOW;
+  }
+
+  function withinWatch() {
+    return automaticChecks < MAX_AUTOMATIC_CHECKS && Date.now() < watchUntil;
   }
 
   function updatePolling() {
     stopPolling();
-    if (pageActive && !document.hidden && !fatal && !redirecting && order?.status === 'PENDING') {
-      pollTimer = window.setInterval(() => { if (!busy) void loadOrder(); }, 15000);
+    if (!pageActive || document.hidden || fatal || redirecting || !needsPolling()) return;
+    if (!withinWatch()) {
+      ui.pollNote.textContent = order.status === 'PAID'
+        ? '自动通知确认已暂停。请点击“刷新产品通知状态”继续确认，无需再次付款。'
+        : '自动状态确认已暂停。请点击刷新继续确认付款结果。';
+      return;
+    }
+    if (!busy) pollTimer = window.setTimeout(() => { pollTimer = null; void loadOrder(true); }, POLL_INTERVAL);
+  }
+
+  function stopAutomaticReturn() {
+    if (returnTimer !== null) window.clearTimeout(returnTimer);
+    returnTimer = null;
+    returnDeadline = null;
+  }
+
+  function updateAutomaticReturn() {
+    const destination = safeHttpsUrl(order?.returnUrl);
+    const eligible = order?.status === 'PAID' && order.fulfillmentStatus === 'delivered'
+      && order.mode === 'live' && destination && !returnCancelled && !fatal && !redirecting;
+    ui.autoReturnNotice.hidden = !eligible;
+    if (!eligible || !pageActive || document.hidden) { stopAutomaticReturn(); return; }
+    if (returnDeadline === null) returnDeadline = Date.now() + RETURN_DELAY;
+    const seconds = Math.max(0, Math.ceil((returnDeadline - Date.now()) / 1000));
+    ui.autoReturnCopy.textContent = `${seconds} 秒后返回 ${order.productName} 查看开通结果。也可以选择留在此页。`;
+    if (!seconds) {
+      redirecting = true;
+      stopPolling(); stopAutomaticReturn();
+      if (expiryTimer !== null) window.clearInterval(expiryTimer);
+      if (cooldownTimer !== null) window.clearTimeout(cooldownTimer);
+      expiryTimer = null;
+      cooldownTimer = null;
+      syncButtons();
+      try { window.location.assign(destination.href); }
+      catch {
+        redirecting = false; returnCancelled = true;
+        ui.autoReturnNotice.hidden = true;
+        ui.errorNotice.textContent = '暂时无法自动返回，请点击“返回产品”查看开通结果。';
+        ui.errorNotice.hidden = false;
+        syncButtons();
+      }
+    } else if (returnTimer === null) {
+      returnTimer = window.setTimeout(() => { returnTimer = null; updateAutomaticReturn(); }, 1000);
     }
   }
 
@@ -100,6 +168,8 @@
     const remaining = seconds >= 3600 ? `${Math.ceil(seconds / 3600)} 小时内有效` : `${Math.floor(seconds / 60)} 分 ${String(seconds % 60).padStart(2, '0')} 秒`;
     ui.orderExpiry.textContent = order.status === 'PENDING' ? `${formatted}（北京时间） · ${seconds ? remaining : '付款时间已结束'}` : `${formatted}（北京时间）`;
     if (isExpired()) {
+      if (expiryTimer !== null) window.clearInterval(expiryTimer);
+      expiryTimer = null;
       ui.statusBadge.textContent = '等待最终确认';
       ui.statusTitle.textContent = '付款时间已结束';
       ui.statusCopy.textContent = '请刷新确认订单的最终状态。若未完成付款，请返回产品重新创建订单。';
@@ -121,6 +191,8 @@
 
   function renderOrder(value) {
     order = validateOrder(value);
+    const phase = order.status === 'PENDING' ? 'payment' : order.status === 'PAID' && order.fulfillmentStatus === 'pending' ? 'fulfillment' : '';
+    if (phase !== watchPhase) { watchPhase = phase; resetWatch(); }
     unavailable = false;
     ui.errorNotice.hidden = true;
     ui.loadingState.hidden = true;
@@ -150,7 +222,7 @@
     if (destination) {
       ui.returnLink.href = destination.href;
       ui.returnLink.textContent = `返回 ${order.productName} ↗`;
-    }
+    } else ui.returnLink.removeAttribute('href');
 
     if (order.status === 'PAID') {
       ui.statusBadge.textContent = order.mode === 'sandbox' ? '测试付款已确认' : '已付款';
@@ -163,7 +235,7 @@
         ? '沙箱付款通知已经送达，仅用于测试，不代表正式产品权益开通。'
         : '沙箱付款已经确认，测试通知仍在送达中。此订单不产生真实收款或正式产品权益。';
       ui.refreshButton.textContent = '刷新产品通知状态';
-      ui.pollNote.textContent = delivered ? '付款通知已送达，开通结果请在原产品查看。' : '已停止付款轮询。通知状态可手动刷新。';
+      ui.pollNote.textContent = delivered ? '付款通知已送达，开通结果请在原产品查看。' : '页面显示时每 15 秒确认一次产品通知状态，最多自动确认 10 分钟。请勿重复付款。';
       document.title = '付款已确认 · Brclio Pay';
     } else if (order.status === 'CLOSED') {
       ui.statusBadge.textContent = '订单已关闭';
@@ -176,18 +248,19 @@
       ui.statusTitle.textContent = '准备好了，就去付款吧';
       ui.statusCopy.textContent = '请核对商品与金额。支付完成后，可回到此页面查看确认结果。';
       ui.refreshButton.textContent = '我已付款，刷新状态';
-      ui.pollNote.textContent = '页面显示时每 15 秒检查一次订单状态。';
+      ui.pollNote.textContent = '页面显示时每 15 秒检查一次订单状态，最多自动确认 10 分钟。';
       document.title = '确认订单 · Brclio Pay';
     }
     if (expiryTimer !== null) window.clearInterval(expiryTimer);
     expiryTimer = null;
     updateExpiry();
-    if (order.status === 'PENDING') expiryTimer = window.setInterval(updateExpiry, 1000);
-    updatePolling();
+    if (order.status === 'PENDING' && !isExpired()) expiryTimer = window.setInterval(updateExpiry, 1000);
+    updateAutomaticReturn();
   }
 
   async function request(suffix = '', method = 'GET', body) {
     const controller = new AbortController();
+    activeRequest = controller;
     const timeout = window.setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch(`/api/checkout/${encodeURIComponent(orderId)}${suffix}`, {
@@ -201,7 +274,7 @@
       if (data?.ready === false) throw new ApiError(503, 'not_ready');
       if (!data) throw new ApiError(502, 'invalid_response');
       return data;
-    } finally { window.clearTimeout(timeout); }
+    } finally { window.clearTimeout(timeout); if (activeRequest === controller) activeRequest = null; }
   }
 
   function showProblem(error, phase = 'read') {
@@ -244,55 +317,77 @@
     }
     if (fatal) {
       stopPolling();
+      stopAutomaticReturn();
+      ui.autoReturnNotice.hidden = true;
+      try { window.sessionStorage.removeItem(storageKey); } catch { /* Storage unavailable. */ }
       if (expiryTimer !== null) window.clearInterval(expiryTimer);
-      expiryTimer = null;
+      if (cooldownTimer !== null) window.clearTimeout(cooldownTimer);
+      expiryTimer = null; cooldownTimer = null;
     }
     syncButtons();
   }
 
-  async function loadOrder() {
+  async function loadOrder(automatic = false) {
     if (busy || fatal || redirecting || !pageActive) return;
+    if (automatic) {
+      if (document.hidden || !needsPolling() || !withinWatch()) { updatePolling(); return; }
+      automaticChecks++;
+    }
     busy = true;
+    const epoch = pageEpoch;
+    lastReadAt = Date.now();
     syncButtons();
-    try { renderOrder(await request()); }
-    catch (error) { showProblem(error); }
-    finally { busy = false; syncButtons(); }
+    try { const value = await request(); if (pageActive && epoch === pageEpoch) renderOrder(value); }
+    catch (error) { if (pageActive && epoch === pageEpoch) showProblem(error); }
+    finally { busy = false; syncButtons(); updatePolling(); }
   }
 
   ui.refreshButton.addEventListener('click', async () => {
     if (busy || fatal || redirecting || Date.now() < cooldownUntil) return;
     busy = true;
+    const epoch = pageEpoch;
+    lastReadAt = Date.now();
+    resetWatch();
     cooldownUntil = Date.now() + 3000;
     ui.refreshButton.textContent = '正在确认…';
     syncButtons();
-    try { renderOrder(await request('/refresh', 'POST')); }
-    catch (error) { showProblem(error); }
+    try {
+      const value = order?.status === 'PAID' ? await request() : await request('/refresh', 'POST');
+      if (pageActive && epoch === pageEpoch) renderOrder(value);
+    }
+    catch (error) { if (pageActive && epoch === pageEpoch) showProblem(error); }
     finally {
       busy = false;
       if (!order) ui.refreshButton.textContent = '重新读取订单';
       else if (!fatal) ui.refreshButton.textContent = order.status === 'PAID' ? '刷新产品通知状态' : '我已付款，刷新状态';
       syncButtons();
+      updatePolling();
       if (cooldownTimer !== null) window.clearTimeout(cooldownTimer);
-      cooldownTimer = window.setTimeout(syncButtons, Math.max(0, cooldownUntil - Date.now()));
+      cooldownTimer = pageActive && !fatal ? window.setTimeout(syncButtons, Math.max(0, cooldownUntil - Date.now())) : null;
     }
   });
 
   ui.payButton.addEventListener('click', async () => {
     if (busy || fatal || unavailable || !order || order.status !== 'PENDING' || isExpired()) return;
     busy = true;
+    const epoch = pageEpoch;
     ui.payButton.textContent = '正在打开支付宝…';
     syncButtons();
     try {
       const channel = document.querySelector('input[name="channel"]:checked')?.value === 'wap' ? 'wap' : 'page';
       const result = await request('/pay', 'POST', { channel });
+      if (!pageActive || epoch !== pageEpoch) return;
       const destination = paymentUrl(result.paymentUrl);
       if (!destination) throw new ApiError(502, 'invalid_response');
       redirecting = true;
       stopPolling();
+      stopAutomaticReturn();
       window.location.assign(destination);
     } catch (error) {
-      showProblem(error, 'pay');
-      ui.payButton.textContent = order.mode === 'sandbox' ? '前往支付宝沙箱 ↗' : '前往支付宝付款 ↗';
+      if (pageActive && epoch === pageEpoch) {
+        showProblem(error, 'pay');
+        ui.payButton.textContent = order.mode === 'sandbox' ? '前往支付宝沙箱 ↗' : '前往支付宝付款 ↗';
+      }
     } finally { busy = false; syncButtons(); }
   });
 
@@ -304,23 +399,48 @@
     } catch { ui.copyFeedback.textContent = '暂时无法复制，请手动选中订单编号。'; }
   });
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopPolling();
-    else if (order?.status === 'PENDING') { updatePolling(); void loadOrder(); }
+  ui.stayButton.addEventListener('click', () => {
+    returnCancelled = true;
+    stopAutomaticReturn();
+    ui.autoReturnNotice.hidden = true;
+    ui.pollNote.textContent = '已保留此页。付款通知已送达，可随时点击返回产品查看开通结果。';
   });
+  ui.returnLink.addEventListener('click', () => {
+    returnCancelled = true; stopAutomaticReturn(); stopPolling();
+    ui.autoReturnNotice.hidden = true;
+  });
+
+  function resumeChecks() {
+    if (!pageActive || document.hidden || fatal || redirecting) return;
+    updateAutomaticReturn();
+    if (needsPolling() && withinWatch() && Date.now() - lastReadAt >= 1000) void loadOrder(true);
+    // Returning to an old tab deserves one fresh read even after its automatic
+    // watch ended. This never renews the budget or starts another polling loop.
+    else if (needsPolling() && !withinWatch() && Date.now() - lastReadAt >= POLL_INTERVAL) void loadOrder();
+    else updatePolling();
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { stopPolling(); stopAutomaticReturn(); }
+    else resumeChecks();
+  });
+  window.addEventListener('focus', resumeChecks);
   window.addEventListener('pagehide', () => {
     pageActive = false;
+    pageEpoch++;
     stopPolling();
+    stopAutomaticReturn();
+    activeRequest?.abort();
     if (expiryTimer !== null) window.clearInterval(expiryTimer);
     if (cooldownTimer !== null) window.clearTimeout(cooldownTimer);
+    expiryTimer = null; cooldownTimer = null;
   });
   window.addEventListener('pageshow', (event) => {
     if (event.persisted) {
       pageActive = true;
       redirecting = false;
-      if (order?.status === 'PENDING') expiryTimer = window.setInterval(updateExpiry, 1000);
+      if (order?.status === 'PENDING' && !isExpired()) expiryTimer = window.setInterval(updateExpiry, 1000);
       updatePolling();
-      void loadOrder();
+      resumeChecks();
     }
   });
 
