@@ -106,7 +106,7 @@ Cloudflare 控制台中“运行时变量”和“构建变量”不是同一层
 | `SKIP_DEPENDENCY_INSTALL` | Builds `1` | 跳过平台预安装，由既定构建命令中的 `npm ci` 安装依赖。 |
 | `CLOUDFLARE_ACCOUNT_ID` | 目标 Builds 使用 `cacceff607775c81f667b7a951d4639f`，与根 Worker 配置一致 | 确定 `aiyuechuang@gmail.com` 的目标部署账号；Pages 部署包装脚本总是从根配置注入此变量，Pages 配置本身不写 `account_id`。源账号旧 Builds 需单独处理，不能误向源账号发布。 |
 | `WRANGLER_SEND_METRICS` | Builds 和 GitHub CI `false` | 关闭 Wrangler 遥测；不控制业务日志或支付状态。 |
-| Build API token | Cloudflare Builds 选择的专用构建 Secret | 由账号持有人创建，包含目标账号 `Workers Scripts:Edit`、`Cloudflare Pages:Edit`、`Account Settings:Read`；通过 API 管理 Builds 配置时另需用户范围 `Workers Builds Configuration:Edit`。不放进 Worker 业务变量。 |
+| Build API token | Cloudflare Builds 选择的专用构建 Secret | 由账号持有人创建，包含目标账号 `Workers Scripts:Edit`、`Cloudflare Pages:Edit`、`Account Settings:Read`；通过 API 管理 Builds 配置时另需账户权限 `Workers Builds Configuration:Edit`（API 名称 `Workers CI Write`）。令牌须从个人资料页创建为用户持有令牌，四项权限均属于账户分类；可加用户详细信息与成员资格读取权限供 Wrangler 识别账户。不放进 Worker 业务变量。 |
 | `HTTPS_PROXY` / `https_proxy` | 本机可选，无业务默认值 | 仅供域名、部署和支付宝预检脚本访问网络；不需要部署到支付 Worker。带认证的代理 URL 也不能进入日志或仓库。 |
 | `BRCLIO_PAY_BASE_URL` | 本机管理员预检默认 `https://pay.bornforthis.cn` | 仅 `scripts/admin-preflight.mjs` 使用；需要预检另一合法 HTTPS 入口时设置，不替代 Worker 的 `PAY_BASE_URL`。 |
 

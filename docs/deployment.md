@@ -60,7 +60,7 @@ npm run deploy:all
 | Build variable `CLOUDFLARE_ACCOUNT_ID` | `cacceff607775c81f667b7a951d4639f` |
 | Build variable `WRANGLER_SEND_METRICS` | `false` |
 
-Build API token 使用目标账户范围的 `Workers Scripts:Edit`、`Cloudflare Pages:Edit` 及 `Account Settings:Read` 权限；若同一令牌还用于 API 管理构建连接、令牌与触发器，另需用户范围的 `Workers Builds Configuration:Edit`。仅有 Worker/Pages 发布权限不能保证 Builds 配置 API 可用。Cloudflare 自动创建的默认 Worker 构建令牌不包含 Pages 权限，不能直接用于本项目的双发布。选择已具备相应权限的令牌，或由账户持有人创建并在 Builds 中选择；令牌只存本机 `secrets/` 或 Cloudflare 的构建 Secret，不复制到 GitHub、聊天或日志。支付宝私钥、管理员派生配置、注册表加密 key 与私有 GitHub 账本凭据属于 Worker 运行时配置，按 [最新维护约定](environment-variables.md#2026-10-18-维护约定) 使用控制台 Text；构建不需要它们，也不保存管理员明文密码。
+Build API token 使用目标账户范围的 `Workers Scripts:Edit`、`Cloudflare Pages:Edit` 及 `Account Settings:Read` 权限；若同一令牌还用于 API 管理构建连接、令牌与触发器，另需账户权限 `Workers Builds Configuration:Edit`（API 名称 `Workers CI Write`）。四项权限行均选“帐户”；“用户持有令牌”指在个人资料页 `/profile/api-tokens` 创建，而不是把构建权限选到“用户”分类。可另加用户权限 `User Details:Read` 与 `Memberships:Read` 供 Wrangler 识别身份和账户。仅有 Worker/Pages 发布权限不能保证 Builds 配置 API 可用。Cloudflare 自动创建的默认 Worker 构建令牌不包含 Pages 权限，不能直接用于本项目的双发布。选择已具备相应权限的令牌，或由账户持有人创建并在 Builds 中选择；令牌只存本机 `secrets/` 或 Cloudflare 的构建 Secret，不复制到 GitHub、聊天或日志。支付宝私钥、管理员派生配置、注册表加密 key 与私有 GitHub 账本凭据属于 Worker 运行时配置，按 [最新维护约定](environment-variables.md#2026-10-18-维护约定) 使用控制台 Text；构建不需要它们，也不保存管理员明文密码。
 
 第一次绑定需存在 Cloudflare GitHub App 的仓库访问授权。构建只连接代码仓库，不连接 BrclioData 私有账本。2026-10-15 的 App 重装及账户关联发生在源账号 `hibrclio@gmail.com`，不是目标账号有效连接的证明。2026-10-18 已发现目标账号存在 Brclio 连接但 OAuth 无效，应优先恢复该目标关联，不能直接卸载共享 App。若控制台要求新增 App 授权、创建认证凭据或验证账户，由账户持有人完成对应确认。
 
