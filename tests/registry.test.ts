@@ -75,6 +75,8 @@ function decrypt(store: MemoryStore, environment: RegistryEnvironment): Record<s
 }
 
 describe('encrypted tenant registry', () => {
+  // This test starts a separate workerd process; shared CI runners can need
+  // more than Vitest's five-second unit-test budget for its cold start.
   it('encrypts, decrypts, and applies scoped onboarding inside real workerd', async () => {
     const [{ build }, { convertV4MiniflareOptions, Log, LogLevel, Miniflare }] = await Promise.all([import('esbuild'), import('miniflare')]);
     const root = fileURLToPath(new URL('../', import.meta.url).href);
@@ -94,7 +96,7 @@ describe('encrypted tenant registry', () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ encrypted: true, plaintextAbsent: true, preserved: true, scoped: true, idempotent: true, uniqueIv: true, paymentMode: true });
     } finally { await runtime.dispose(); }
-  });
+  }, 30_000);
 
   it('reads legacy clients without mutation and imports every tenant atomically on first update', async () => {
     const store = new MemoryStore();
