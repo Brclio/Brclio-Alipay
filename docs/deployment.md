@@ -12,21 +12,23 @@
 - 本机 secrets/ 不提交 Git；2026-10-18 用户选择 Worker 运行时变量在控制台使用 Text 明文维护，详见 [环境变量说明](environment-variables.md)。构建令牌仍使用 Secret。
 - 管理入口 `/admin`；账户、加密注册表及单平台 AI 授权见 [接入管理](admin.md)。
 
-## 2026-10-18 账号迁移进行中
+## 2026-10-18 账号迁移完成
 
-目标账号的 Worker 与 Pages 已部署，18 项 Text 运行变量已配置，原 11 项敏感变量与既有备份逐项一致。目标 Worker、目标 Pages 和公开域名三个入口共同通过 42 次 GET 连续性核对，能够解密原平台注册表、读取固定私有仓库 `main` 的全部 3 笔既有订单，并使用原产品签名及原收银台令牌读取这些订单，队列与报表核对通过。目标 Pages 项目 ID 为 `4be13ccb-e737-4267-8b79-eb59d94c8767`，已验证的首次迁移部署 ID 为 `815dd7cc-438a-4aa2-88ff-71021d98ba90`，同账号服务绑定已验证；最终代码提交与发布 ID 以 [交付状态](status.md) 的后续记录为准。产品长期 API/webhook 密钥、商户、付款环境、公开 `PAY_BASE_URL`、订单快照与数据仓库均保留。
+目标账号的 Worker、Pages、公开域名与 main 自动发布已完成迁移。18 项运行变量均为 Text，全部 18 项原值及其中 11 项敏感值逐项一致，`keep_vars: true` 保留。首次目标 main 自动发布后，目标 Worker、目标 Pages 和公开域名三个入口再次通过 42 次 GET 连续性核对：原注册表 blob 与解密后哈希一致，固定私有仓库 `main` 的 17 个历史 blob 保留，全部 3 笔既有订单、原产品签名及旧收银台令牌可用，事件、队列与报表核对通过，旧账索引覆盖完整。目标 Pages 项目 ID 为 `4be13ccb-e737-4267-8b79-eb59d94c8767`，同账号服务绑定已验证。产品长期 API/webhook 密钥、商户、付款环境、公开 `PAY_BASE_URL`、订单快照与数据仓库均保留。
 
 用户已只修改阿里云 `pay` CNAME，`8.8.8.8` 与 `1.1.1.1` 均解析到目标 Pages，目标自定义域名的状态、验证与证书均为 `active`，公开 HTTPS 入口已通过上述核对。源 Worker 的 Cron 已清空验证，旧 main 构建触发器已备份并删除，源账号活跃触发器为 0；旧自定义域名已成功解绑，解绑后目标状态仍均为 active，Worker 与公开域名部署预检全部通过。旧 Worker 和 Pages 的默认入口保留回退。
 
-目标 `*/5 * * * *` Cron 配置已核对。源 Cron 停用后，账本仍出现既有订单查单时间推进，构成目标补偿任务运行的间接证据；尚未取得带目标账号归属的定时调用日志，不能声称已完成独立的调度事件追踪。
+目标 `*/5 * * * *` Cron 配置及实际执行均已验证。显式指定目标账号和 Worker 后，用标准 Wrangler tail 被动捕获一次定时事件，对应首次自动发布 Worker 版本 `d2aa9fd5-0591-4df8-a569-a1f483a35e71`，结果为 `outcome=ok`，异常、日志和维护告警计数均为 0。观测时间为 2026-10-18 22:10:39（上海时间）；没有主动触发测试或付款，事件结束后已停止 tail。详细脱敏证据路径见 [交付状态](status.md)。
 
-目标账号的用户持有构建令牌已验证有效，代码仓库连接、唯一 main 生产触发器、双发布命令及四项构建变量已配置并回读一致，配置操作前后的 Worker 运行变量未变。首次推送构建仍待实际验收；连接记录或触发器配置成功不能替代对应提交的构建、Worker 和 Pages 发布证据。268 项测试及全部 workerd 运行时检查此前已通过。本轮只读验证不产生新的真实付款或产品权益开通证据。
+目标账号的用户持有构建令牌、代码仓库连接、唯一 main 生产触发器、双发布命令及四项构建变量已配置并回读一致。首次目标自动发布验收提交为 `829e064882a6bbd4f13a4ff9e758609cfe07c606`：真实 main 推送触发 Build `27896e2d-cbc2-4c17-b44f-37cfa2776847`（`source=push_event`），`ci:verify` 的 268 项测试、构建、全部 workerd 检查及 `deploy:all` 均成功。对应 Worker 版本为 `d2aa9fd5-0591-4df8-a569-a1f483a35e71`，Pages 部署为 `a1ee3d7c-2e08-42d8-8256-ba93fa8b52e7`，Pages 提交元数据匹配；[该提交的 GitHub CI](https://github.com/Brclio/Brclio-Alipay/actions/runs/39134292648) 同样成功。
+
+自动发布后独立回读确认：18 项 Text 原值、`keep_vars`、同账号服务绑定、域名三项 active、源账号 Cron/触发器/自定义域名均为 0，以及目标唯一 main 触发器和五分钟 Cron 均符合配置。以上 ID 记录首次目标推送验收，后续文档或代码提交会产生新的 Build 与版本，必须按各自提交验收，不能把此记录当作永久当前版本。本轮没有新增真实付款或产品权益开通证据。
 
 迁移不复制或初始化一套新账本，也不引入 D1、KV、R2 或新数据库。切换公开入口前后均使用同一私有 GitHub 数据仓库和原密钥；不能通过恢复旧快照覆盖迁移期间产生的订单、付款或通知状态。回退仅调整入口或部署，继续使用当前账本；保留待投递事件并核对补偿任务，避免新旧部署同时运行带来的重复投递，产品端仍必须幂等。
 
 ## GitHub 自动部署
 
-目标代码仓库为 `Brclio/Brclio-Alipay`，生产分支为 `main`。自动发布方案使用 **Cloudflare Workers Builds** 监听推送，由同一次构建顺序发布已有 Worker 和 Pages；目标账号尚未完成这一配置，当前使用受控手动发布。私有账本仓库不接入构建，也不触发代码发布。
+目标代码仓库为 `Brclio/Brclio-Alipay`，生产分支为 `main`。目标账号使用 **Cloudflare Workers Builds** 监听推送，由同一次构建顺序发布已有 Worker 和 Pages；首次真实 main 推送已完成双发布验收。私有账本仓库不接入构建，也不触发代码发布。
 
 目标 Pages `brclio-pay-aiyuechuang` 使用 Direct Upload，构建通过 `deploy:pages` 上传入口，绑定同账号 Worker `brclio-pay`；源账号项目 `brclio-pay` 保留回退，不参与目标账号日常发布。Direct Upload 项目不能原地切换到 Pages Git integration。Wrangler 4.150 对新名称执行 `pages project create` 时会转交 Workers 创建流程；需要先通过 Cloudflare Pages API 创建真正的 Pages 项目，再执行现有 `deploy:pages` 命令，不能把同名普通 Worker 当作 Pages 项目。参见 [Cloudflare Direct Upload](https://developers.cloudflare.com/pages/get-started/direct-upload/) 和 [Workers Builds 配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)。
 
@@ -41,7 +43,7 @@ npm run deploy:all
 
 `ci:verify` 先同步 Skill 和文档，再运行类型检查、自动测试、构建与 workerd 运行时验证。测试使用临时内存凭据和模拟上游，不执行真实付款。`deploy:all` 先发布 Worker，再发布 Pages，最后执行只读 HTTPS 验收。任何步骤失败均返回非零退出码，不继续后续发布步骤。
 
-`.github/workflows/ci.yml` 为 main 推送、Pull Request 与手动触发提供 GitHub 检查；它只有 `contents:read` 权限，不接收部署凭据，也不发布生产服务。生产发布只面向目标 Cloudflare 账号；完成 Builds 前按下述命令手动发布，不恢复源账号触发器或建立第二条自动发布路径。
+`.github/workflows/ci.yml` 为 main 推送、Pull Request 与手动触发提供 GitHub 检查；它只有 `contents:read` 权限，不接收部署凭据，也不发布生产服务。生产自动发布只由目标 Cloudflare 账号的唯一 main 触发器负责，不恢复源账号触发器或建立第二条自动发布路径。必要时可以从确认过的同一提交运行 `deploy:all`，之后仍须核对 Worker、Pages 与公开入口。
 
 ### 一次性控制台绑定
 
@@ -62,7 +64,7 @@ npm run deploy:all
 
 Build API token 使用目标账户范围的 `Workers Scripts:Edit`、`Cloudflare Pages:Edit` 及 `Account Settings:Read` 权限；若同一令牌还用于 API 管理构建连接、令牌与触发器，另需账户权限 `Workers Builds Configuration:Edit`（API 名称 `Workers CI Write`）。四项权限行均选“帐户”；“用户持有令牌”指在个人资料页 `/profile/api-tokens` 创建，而不是把构建权限选到“用户”分类。可另加用户权限 `User Details:Read` 与 `Memberships:Read` 供 Wrangler 识别身份和账户。仅有 Worker/Pages 发布权限不能保证 Builds 配置 API 可用。Cloudflare 自动创建的默认 Worker 构建令牌不包含 Pages 权限，不能直接用于本项目的双发布。选择已具备相应权限的令牌，或由账户持有人创建并在 Builds 中选择；令牌只存本机 `secrets/` 或 Cloudflare 的构建 Secret，不复制到 GitHub、聊天或日志。支付宝私钥、管理员派生配置、注册表加密 key 与私有 GitHub 账本凭据属于 Worker 运行时配置，按 [最新维护约定](environment-variables.md#2026-10-18-维护约定) 使用控制台 Text；构建不需要它们，也不保存管理员明文密码。
 
-第一次绑定需存在 Cloudflare GitHub App 的仓库访问授权。构建只连接代码仓库，不连接 BrclioData 私有账本。2026-10-15 的 App 重装及账户关联发生在源账号 `hibrclio@gmail.com`，不是目标账号有效连接的证明。2026-10-18 已发现目标账号存在 Brclio 连接但 OAuth 无效，应优先恢复该目标关联，不能直接卸载共享 App。若控制台要求新增 App 授权、创建认证凭据或验证账户，由账户持有人完成对应确认。
+第一次绑定需存在 Cloudflare GitHub App 的仓库访问授权。构建只连接代码仓库，不连接 BrclioData 私有账本。2026-10-15 的 App 重装及账户关联发生在源账号 `hibrclio@gmail.com`，不是目标账号有效连接的证明。2026-10-18 已在目标账号完成连接与真实推送验收；今后若关联异常，优先修复对应账号的已有连接，不能直接卸载共享 App。若控制台要求新增 App 授权、创建认证凭据或验证账户，由账户持有人完成对应确认。
 
 若 GitHub 已安装 App，但 Cloudflare 找不到 Brclio 仓库或连接返回 `8000008`（Git account disconnected），需检查该安装是否关联当前 Cloudflare 账户；已有安装不能证明关联有效。Cloudflare 建议一个 GitHub 账户只关联一个 Cloudflare 账户，Workers 与 Pages 共用 App。通过当前账户的连接入口重新授权；确需卸载重装时，只处理 Brclio 组织中的 Cloudflare Workers and Pages，保留原仓库授权范围，并先评估相关项目的新构建会暂停。已部署服务仍继续托管。参见 [GitHub 集成与重新安装](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/github-integration/#reinstall-the-cloudflare-github-app)。
 
@@ -70,7 +72,7 @@ Build API token 使用目标账户范围的 `Workers Scripts:Edit`、`Cloudflare
 
 首次绑定后推送一个提交，确认 Cloudflare Builds 自动启动，记录 Git commit、Build ID、Worker version 和 Pages deployment ID。仅看到“仓库已连接”不能证明自动发布成功。`node scripts/deployment-preflight.mjs` 检查 Worker 与域名入口的版本、环境及实际收款状态和仓库配置一致，并检查后台资源、匿名管理接口拒绝与静态 Skill ZIP 不公开；不登录后台、不创建订单、不调用支付宝。HTTPS 成功说明该连接的证书可用；域名控制台状态另用本机 `node scripts/pages-domain.mjs status` 查看。
 
-Worker 和 Pages 是两次发布，不能视为原子部署。若 Worker 已成功、Pages 失败，先修复权限或上传问题，再从相同提交重试；不要重新生成任何业务 Secret。Cloudflare 可能跳过尚未启动的旧排队构建，但不能依赖它回滚或取消已经开始的发布。生产只使用 main，不建立第二条自动发布路径；回退用 Git revert 后推送 main，当前阶段还须按同一提交手动发布，Builds 完成并验证后才可依赖自动发布；始终验证两部分均更新。
+Worker 和 Pages 是两次发布，不能视为原子部署。若 Worker 已成功、Pages 失败，先修复权限或上传问题，再从相同提交重试；不要重新生成任何业务 Secret。Cloudflare 可能跳过尚未启动的旧排队构建，但不能依赖它回滚或取消已经开始的发布。生产只使用 main，不建立第二条自动发布路径；代码回退用 Git revert 后推送 main，由目标 Builds 自动发布，并验证对应 Build、Worker 与 Pages 均成功。入口回退继续使用当前 GitHub 账本，不能恢复旧账覆盖新状态。
 
 自动部署只改变代码和配置。`wrangler.jsonc` 中 7 项 vars 会随发布应用，仍以代码为准；`PAYMENT_ENABLED` 不能在控制台临时改动后期待下次 Git 发布自动保留。维护配置使用 `keep_vars: true` 保留控制台独有的敏感 Text 项，不把真实值写进仓库；同名 vars 仍按代码覆盖。流水线不执行 `bootstrap`、`prepare-secrets`、`configure-admin` 或 `secret bulk`。详见 [配置来源与发布规则](environment-variables.md#配置来源与发布规则)。
 

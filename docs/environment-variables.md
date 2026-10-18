@@ -12,11 +12,13 @@ Text 变量可由拥有相应 Cloudflare 控制台权限的人查看和复制，
 
 2026-10-18 先在源账号 `hibrclio@gmail.com` 将原 11 项 Secret 以原备份值转换为 Text；加上原有 7 项参数，共 18 项字符串运行变量。转换后逐项读取类型及比较原备份值通过，原注册表密文未改变，管理员会话校验、旧收银台签名校验及现有产品签名目录读取通过，保持 `live` 和收款开启。
 
-随后按用户要求迁往内置浏览器登录的 `aiyuechuang@gmail.com`，Account ID 为 `cacceff607775c81f667b7a951d4639f`。目标 Worker `brclio-pay` 已部署至 `https://brclio-pay.aiyuechuang.workers.dev`，18 项运行变量均为 Text，原 11 项敏感值逐项保留，`keep_vars: true` 保留。Cloudflare 登录邮箱的变化不改变 `ADMIN_EMAIL`、商户、产品长期凭据、私有数据仓库或分支。
+随后按用户要求迁往内置浏览器登录的 `aiyuechuang@gmail.com`，Account ID 为 `cacceff607775c81f667b7a951d4639f`。目标 Worker `brclio-pay` 已部署至 `https://brclio-pay.aiyuechuang.workers.dev`，18 项运行变量均为 Text，全部 18 项原值及其中 11 项敏感值逐项保留，`keep_vars: true` 保留。Cloudflare 登录邮箱的变化不改变 `ADMIN_EMAIL`、商户、产品长期凭据、私有数据仓库或分支。
 
-服务及公开域名已迁至目标账号：用户仅将阿里云 `pay` CNAME 改为 `brclio-pay-aiyuechuang.pages.dev`，`8.8.8.8` 与 `1.1.1.1` 已解析到新入口，目标域名、验证与证书状态均为 `active`。目标 Worker、Pages 和 `https://pay.bornforthis.cn` 三个入口共同通过 42 次 GET 连续性核对，原注册表、全部 3 笔历史订单和旧收银台令牌可读，队列及报表一致。
+服务及公开域名已迁至目标账号：用户仅将阿里云 `pay` CNAME 改为 `brclio-pay-aiyuechuang.pages.dev`，`8.8.8.8` 与 `1.1.1.1` 已解析到新入口，目标域名、验证与证书状态均为 `active`。首次目标 main 自动发布后，目标 Worker、Pages 和 `https://pay.bornforthis.cn` 三个入口再次通过 42 次 GET 连续性核对：原注册表 blob 与解密后哈希一致，17 个历史 blob 保留，全部 3 笔历史订单和旧收银台令牌可读，队列及报表一致，旧账索引覆盖完整。核验没有新建订单或请求支付宝。
 
-源 Cron 已停用、原 main 自动构建触发器已备份并删除，源活跃触发器为 0；旧自定义域名已解绑，目标域名状态仍均为 active，Worker 与公开域名部署预检全部通过。旧 Worker/Pages 默认入口保留回退。目标五分钟 Cron 配置已核对，源 Cron 停用后账本查单时间继续推进，属于间接运行证据，尚未取得带目标账号归属的调度调用日志。目标 Builds 的 OAuth、构建令牌和触发器尚待完成，当前使用受控手动发布。代码发布及后续部署保留须以 [交付状态](status.md) 对应 Git 提交的实际发布结果和只读验收记录为准；本轮未执行真实付款，不能据此新增资金到账或产品实际开通的验收结论。
+源 Cron 已停用、原 main 自动构建触发器已备份并删除，源活跃触发器为 0；旧自定义域名已解绑，目标域名状态仍均为 active，Worker 与公开域名部署预检全部通过。旧 Worker/Pages 默认入口保留回退。目标五分钟 Cron 配置及实际执行均已核对：显式选择目标账号和 Worker 后，Wrangler tail 被动捕获一次 `*/5 * * * *` 事件，`outcome=ok`，异常、日志和维护告警均为 0；没有主动触发测试或付款，事件后已停止观察。版本、时间和脱敏证据路径见 [交付状态](status.md)。
+
+目标 Builds 已完成真实 main 推送验收：提交 `829e064882a6bbd4f13a4ff9e758609cfe07c606` 触发的 Build `27896e2d-cbc2-4c17-b44f-37cfa2776847` 成功，验证与 Worker/Pages 双发布均通过。发布后独立回读确认全部 18 项仍为 Text 且原值一致，`keep_vars: true`、同账号服务绑定及三项域名 active 保持，目标只有一个 main 生产触发器。此为首次目标推送验收记录，后续提交须分别核对实际 Build 和部署，具体版本见 [交付状态](status.md)。本轮未执行真实付款，不能据此新增资金到账或产品实际开通的验收结论。
 
 ## 配置来源与发布规则
 
@@ -110,7 +112,7 @@ Cloudflare 控制台中“运行时变量”和“构建变量”不是同一层
 | `HTTPS_PROXY` / `https_proxy` | 本机可选，无业务默认值 | 仅供域名、部署和支付宝预检脚本访问网络；不需要部署到支付 Worker。带认证的代理 URL 也不能进入日志或仓库。 |
 | `BRCLIO_PAY_BASE_URL` | 本机管理员预检默认 `https://pay.bornforthis.cn` | 仅 `scripts/admin-preflight.mjs` 使用；需要预检另一合法 HTTPS 入口时设置，不替代 Worker 的 `PAY_BASE_URL`。 |
 
-构建命令为 `npm ci && npm run ci:verify`，部署命令为 `npm run deploy:all`；其中 `deploy:pages` 必须使用 `scripts/deploy-pages.mjs` 包装脚本以固定目标账号。目标账号的 Brclio 连接已存在但 OAuth 无效（`has_valid_oauth_token=false`），应恢复该关联并配置、验收构建令牌和触发器，不能盲目卸载共享 App。源账号的历史成功不能替代目标账号证据。构建无需读取支付宝、管理员、注册表或私有账本运行凭据，不执行任何密钥初始化或批量上传脚本。
+构建命令为 `npm ci && npm run ci:verify`，部署命令为 `npm run deploy:all`；其中 `deploy:pages` 必须使用 `scripts/deploy-pages.mjs` 包装脚本以固定目标账号。目标账号的代码仓库连接、构建令牌和唯一 main 触发器已配置，并通过真实推送双发布验收。今后如遇关联或权限异常，应先核对目标账号连接和令牌权限，不能盲目卸载共享 App；源账号的历史成功不能替代目标账号当次证据。构建无需读取支付宝、管理员、注册表或私有账本运行凭据，不执行任何密钥初始化或批量上传脚本。
 
 产品服务端示例使用另一组配置：`PAY_BASE_URL`、`PAY_CLIENT_ID`、`PAY_API_SECRET`、`PAY_WEBHOOK_SECRET`。其中 API/webhook 密钥只在产品可信后端保存；`PAY_SKU`、`PAY_PRODUCT_ORDER_ID`、`PAY_RETURN_URL` 只供 `examples/client.mjs` 演示请求。支付中心显示类型调整不改变产品已有配置。产品接入约定见 [integration.md](integration.md)。
 
