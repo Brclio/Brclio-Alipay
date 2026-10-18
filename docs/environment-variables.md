@@ -10,16 +10,23 @@ Text 变量可由拥有相应 Cloudflare 控制台权限的人查看和复制，
 
 此选择只适用于本项目 Worker 的运行时变量。Cloudflare Builds 的部署令牌仍按构建 Secret 管理；Pages 只使用原有服务绑定；产品自己的后端凭据保持原配置。私有 GitHub 中的平台注册表继续使用 AES-256-GCM 密文，订单、outbox 与报表索引沿用原持久层，不能据此声称全部数据都加密。
 
-2026-10-18 已通过系统 Chrome 将原 11 项 Secret 以原备份值转换为 Text；加上原有 7 项参数，共 18 项字符串运行变量。转换后逐项读取类型及比较原备份值通过，原注册表密文未改变，管理员会话校验、旧收银台签名校验及现有产品签名目录读取通过，保持 `live` 和收款开启。代码发布及后续部署保留仍须以对应 Git 提交的实际发布结果和只读验收记录为准；本轮未执行真实付款，不能据此新增资金到账或产品实际开通的验收结论。
+2026-10-18 先在源账号 `hibrclio@gmail.com` 将原 11 项 Secret 以原备份值转换为 Text；加上原有 7 项参数，共 18 项字符串运行变量。转换后逐项读取类型及比较原备份值通过，原注册表密文未改变，管理员会话校验、旧收银台签名校验及现有产品签名目录读取通过，保持 `live` 和收款开启。
+
+随后按用户要求迁往内置浏览器登录的 `aiyuechuang@gmail.com`，Account ID 为 `cacceff607775c81f667b7a951d4639f`。目标 Worker `brclio-pay` 已部署至 `https://brclio-pay.aiyuechuang.workers.dev`，18 项运行变量均为 Text，原 11 项敏感值逐项保留，`keep_vars: true` 保留。Cloudflare 登录邮箱的变化不改变 `ADMIN_EMAIL`、商户、产品长期凭据、私有数据仓库或分支。
+
+服务及公开域名已迁至目标账号：用户仅将阿里云 `pay` CNAME 改为 `brclio-pay-aiyuechuang.pages.dev`，`8.8.8.8` 与 `1.1.1.1` 已解析到新入口，目标域名、验证与证书状态均为 `active`。目标 Worker、Pages 和 `https://pay.bornforthis.cn` 三个入口共同通过 42 次 GET 连续性核对，原注册表、全部 3 笔历史订单和旧收银台令牌可读，队列及报表一致。
+
+源 Cron 已停用、原 main 自动构建触发器已备份并删除，源活跃触发器为 0；旧自定义域名已解绑，目标域名状态仍均为 active，Worker 与公开域名部署预检全部通过。旧 Worker/Pages 默认入口保留回退。目标五分钟 Cron 配置已核对，源 Cron 停用后账本查单时间继续推进，属于间接运行证据，尚未取得带目标账号归属的调度调用日志。目标 Builds 的 OAuth、构建令牌和触发器尚待完成，当前使用受控手动发布。代码发布及后续部署保留须以 [交付状态](status.md) 对应 Git 提交的实际发布结果和只读验收记录为准；本轮未执行真实付款，不能据此新增资金到账或产品实际开通的验收结论。
 
 ## 配置来源与发布规则
 
 | 配置位置 | 内容 | 后续维护方式 |
 | --- | --- | --- |
 | 根目录 `wrangler.jsonc` 的 `vars` | 下表 7 项非敏感运行参数 | 代码为准；修改后正常发布。同名控制台值会在发布时采用代码中的值。 |
-| Worker `brclio-pay` → Settings → Variables and Secrets | 原 11 项 Secret 对应的 Text 变量，以及必要时配置的 `ALIPAY_GATEWAY` | 只在控制台和本机受限备份中维护真实值；不把值补进 `wrangler.jsonc`。 |
+| 目标账号 `aiyuechuang@gmail.com` → Worker `brclio-pay` → Settings → Variables and Secrets | 原 11 项 Secret 对应的 Text 变量，以及必要时配置的 `ALIPAY_GATEWAY` | 核对 Account ID；只在控制台和本机受限备份中维护真实值，不把值补进 `wrangler.jsonc`。 |
 | 根目录 `wrangler.jsonc` 的 `keep_vars: true` | 保留控制台独有的变量 | 正常发布必须保留此配置，避免清除未列入仓库 `vars` 的运行凭据；它不阻止代码覆盖同名 `vars`。 |
-| `cloudflare/pages/wrangler.jsonc` | `PAYMENT_BACKEND` 服务绑定 | 指向同账号原 Worker `brclio-pay`；不复制运行凭据。 |
+| `cloudflare/pages/wrangler.jsonc` | 目标 Pages `brclio-pay-aiyuechuang` 的 `PAYMENT_BACKEND` 服务绑定 | 指向目标账号 Worker `brclio-pay`；不复制运行凭据，不能跨账号绑定源 Worker。 |
+| 根目录 `wrangler.jsonc` 的 `account_id` 与 `scripts/deploy-pages.mjs` | Worker 与 Pages 共同的部署账号来源 | Pages Wrangler 文件不支持 `account_id`；包装脚本将根账号以 `CLOUDFLARE_ACCOUNT_ID` 注入部署子进程，并读取 Pages 配置中的项目名。 |
 | Cloudflare Worker → Settings → Builds | 构建参数和专用部署令牌 | 与 Worker 运行时配置分开管理；不把支付运行凭据交给构建。 |
 | 本机被 Git 忽略的 `secrets/` | 原始密钥和受限备份文件 | 目录权限 0700、敏感文件权限 0600；只保留在本机受控位置，不上传整个目录。 |
 
@@ -45,7 +52,7 @@ Cloudflare 控制台中“运行时变量”和“构建变量”不是同一层
 
 ## 控制台管理的 11 项敏感运行变量
 
-本轮目标是把下表原 Secret 类型逐项以**同名、同值**维护为 Text。Text/Secret 对应用代码均以字符串 `env.NAME` 提供；不能以显示方式调整为由改变值。没有安全的业务默认值，缺失时不得用示例值或随机值替代。
+下表原 Secret 类型逐项以**同名、同值**维护为 Text，账号迁移继续沿用原值。Text/Secret 对应用代码均以字符串 `env.NAME` 提供；不能以显示方式或账号调整为由改变值。没有安全的业务默认值，缺失时不得用示例值或随机值替代。
 
 | 名称 | 用途与要求 | 原值来源 / 首次生成方式 | 后续维护与影响 |
 | --- | --- | --- | --- |
@@ -86,10 +93,10 @@ Cloudflare 控制台中“运行时变量”和“构建变量”不是同一层
 | `ADMIN_LOGIN_LIMITER` | Worker Rate limit，namespace `2026101401`，5 次/60 秒 | 管理员登录保护；缺失时拒绝登录。 |
 | `INTEGRATION_LIMITER` | Worker Rate limit，namespace `2026101402`，30 次/60 秒 | 单平台 AI 接入 API 限流；缺失时拒绝接入服务。 |
 | `PAYMENT_API_LIMITER` | Worker Rate limit，namespace `2026101403`，120 次/60 秒 | 支付 API 限流；维护时保留既有保护。 |
-| `PAYMENT_BACKEND` | Pages service binding → Worker `brclio-pay` | 域名入口把动态请求转发给原支付服务，Pages 无需持有商户或管理员运行凭据。 |
+| `PAYMENT_BACKEND` | 目标 Pages `brclio-pay-aiyuechuang` service binding → 同账号 Worker `brclio-pay` | 域名入口把动态请求转发给目标支付服务，Pages 无需持有商户或管理员运行凭据。 |
 | `triggers.crons` | Worker `*/5 * * * *` | 每五分钟补偿查单及通知重试，不能因变量维护删除。 |
 
-阿里云仍负责外部 DNS，保留 `pay` 的 CNAME 与根域名 nameserver。此维护不需要新建数据库、存储资源、Worker 或 Pages 项目。
+阿里云仍负责外部 DNS，根域名 nameserver 保留。单纯改变变量类型不需要新项目；本次跨账号迁移在目标账号新建 Worker 与 Pages，正式切换时只更新 `pay` 的 CNAME 至 `brclio-pay-aiyuechuang.pages.dev`，源项目保留回退。不新建数据库或存储资源，GitHub 原账本及加密注册表继续使用同仓同分支。
 
 ## 构建与本机工具变量
 
@@ -97,13 +104,13 @@ Cloudflare 控制台中“运行时变量”和“构建变量”不是同一层
 | --- | --- | --- |
 | `NODE_VERSION` | Builds `22` | 固定构建 Node 主版本；直接配置，无需生成随机值。 |
 | `SKIP_DEPENDENCY_INSTALL` | Builds `1` | 跳过平台预安装，由既定构建命令中的 `npm ci` 安装依赖。 |
-| `CLOUDFLARE_ACCOUNT_ID` | Builds 使用与 `wrangler.jsonc` 相同账号 ID | 确定部署账号；账号 ID 是标识，不是令牌。不要改成其他账号。 |
+| `CLOUDFLARE_ACCOUNT_ID` | 目标 Builds 使用 `cacceff607775c81f667b7a951d4639f`，与根 Worker 配置一致 | 确定 `aiyuechuang@gmail.com` 的目标部署账号；Pages 部署包装脚本总是从根配置注入此变量，Pages 配置本身不写 `account_id`。源账号旧 Builds 需单独处理，不能误向源账号发布。 |
 | `WRANGLER_SEND_METRICS` | Builds 和 GitHub CI `false` | 关闭 Wrangler 遥测；不控制业务日志或支付状态。 |
-| Build API token | Cloudflare Builds 选择的专用构建 Secret | 由账号持有人创建，包含当前账号 `Workers Scripts:Edit`、`Cloudflare Pages:Edit`、`Account Settings:Read`；只发布代码和入口，不放进 Worker 业务变量。 |
+| Build API token | Cloudflare Builds 选择的专用构建 Secret | 由账号持有人创建，包含目标账号 `Workers Scripts:Edit`、`Cloudflare Pages:Edit`、`Account Settings:Read`；通过 API 管理 Builds 配置时另需用户范围 `Workers Builds Configuration:Edit`。不放进 Worker 业务变量。 |
 | `HTTPS_PROXY` / `https_proxy` | 本机可选，无业务默认值 | 仅供域名、部署和支付宝预检脚本访问网络；不需要部署到支付 Worker。带认证的代理 URL 也不能进入日志或仓库。 |
 | `BRCLIO_PAY_BASE_URL` | 本机管理员预检默认 `https://pay.bornforthis.cn` | 仅 `scripts/admin-preflight.mjs` 使用；需要预检另一合法 HTTPS 入口时设置，不替代 Worker 的 `PAY_BASE_URL`。 |
 
-现有构建命令为 `npm ci && npm run ci:verify`，部署命令为 `npm run deploy:all`。构建无需读取支付宝、管理员、注册表或私有账本运行凭据，不执行任何密钥初始化或批量上传脚本。
+构建命令为 `npm ci && npm run ci:verify`，部署命令为 `npm run deploy:all`；其中 `deploy:pages` 必须使用 `scripts/deploy-pages.mjs` 包装脚本以固定目标账号。目标账号的 Brclio 连接已存在但 OAuth 无效（`has_valid_oauth_token=false`），应恢复该关联并配置、验收构建令牌和触发器，不能盲目卸载共享 App。源账号的历史成功不能替代目标账号证据。构建无需读取支付宝、管理员、注册表或私有账本运行凭据，不执行任何密钥初始化或批量上传脚本。
 
 产品服务端示例使用另一组配置：`PAY_BASE_URL`、`PAY_CLIENT_ID`、`PAY_API_SECRET`、`PAY_WEBHOOK_SECRET`。其中 API/webhook 密钥只在产品可信后端保存；`PAY_SKU`、`PAY_PRODUCT_ORDER_ID`、`PAY_RETURN_URL` 只供 `examples/client.mjs` 演示请求。支付中心显示类型调整不改变产品已有配置。产品接入约定见 [integration.md](integration.md)。
 
@@ -146,9 +153,9 @@ npx wrangler secret bulk secrets/admin-worker-secrets.json
 
 ## 保持现有支付接入的操作顺序
 
-1. 先确认目标是同账号 Worker `brclio-pay` 的运行时设置，记录变量名称、类型、部署版本及当前 `live` / 收款状态；核对可靠原值备份，记录中不包含值。
+1. 先确认目标是 `aiyuechuang@gmail.com`、Account ID `cacceff607775c81f667b7a951d4639f` 的 Worker `brclio-pay` 运行时设置；浏览器与 Wrangler 分别核对账号，记录变量名称、类型、部署版本及当前 `live` / 收款状态，记录中不包含值。
 2. 保留仓库管理的 7 项参数，尤其 `PAYMENT_ENABLED=true`、正式 AppID、原数据仓库及分支。确认发布配置保留 `keep_vars: true`；不删除非字符串绑定、Cron 或 Pages 入口。
-3. 原 11 项敏感变量只以同名、同值转换为 Text，保留 PEM 换行、JSON 内容、hash 中的 `$` 和所有 key 原字节。避免先部署一个缺变量的中间版本；保存后确认它们共同存在，不把空白、掩码、占位符当作值。
+3. 原 11 项敏感变量只以同名、同值维护为 Text，迁移到目标账号也逐字保留 PEM 换行、JSON 内容、hash 中的 `$` 和所有 key 原字节。避免先部署一个缺变量的中间版本；保存后确认它们共同存在，不把空白、掩码、占位符当作值。
 4. 不重新运行初始化、不重建平台注册表、不改产品长期 API/webhook Secret、不改回调或 SKU；已有订单和待投递事件继续使用原配置。
 5. 使用正常发布命令更新维护配置及文档，确认 Worker 与 Pages 对应发布均成功；未来也必须保留控制台专属 Text 项，不能用 `vars` 全量重置或旧 bulk 文件覆盖。
 6. 执行只读验收，分别记录配置检查、代码检查、部署、HTTPS 入口与域名证书；只有人工实付且产品真实权益落库后，才记录新的到账/开通结论。
@@ -161,9 +168,12 @@ npm run test:runtime
 npm run test:security-runtime
 node scripts/deployment-preflight.mjs
 node scripts/pages-domain.mjs status
+node scripts/verify-migration.mjs --base https://brclio-pay.aiyuechuang.workers.dev --base https://brclio-pay-aiyuechuang.pages.dev --base https://pay.bornforthis.cn
 ```
 
 运行时测试使用临时内存密钥和模拟上游，不执行真实付款。部署预检核对版本、`ready`、`acceptingPayments`、`mode`、资源、安全头及匿名拒绝边界，不创建订单；`ready=true` 只说明配置齐全。管理员只读预检可通过 stdin 登录，验证会话、平台列表和 Skill 下载，不输出凭据。无需为变量显示方式验证而触发真实收款、补建账本或重发产品权益。
+
+`verify-migration.mjs` 的远程请求全部为 GET，使用本机受限原值备份，在内存解密原注册表、签名读取目录和历史订单、验证旧收银台令牌，并核对账本、outbox/队列与报表一致性。有迁移前基线时同时核对历史连续性，没有基线仅证明当前状态一致。脚本不调用 `/refresh` 或 `/pay`、不调用支付宝、不写账本、不补发权益；它也不验证账号归属、DNS/证书、Cron 执行、Builds、真实资金或产品权益。参数、脱敏证据文件与覆盖边界见 [账号迁移只读核对](deployment.md#账号迁移的只读连续性核对)。
 
 ## 常见故障定位
 

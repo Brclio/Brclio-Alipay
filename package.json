@@ -13,7 +13,7 @@
     "predeploy": "node scripts/sync-docs.mjs && node scripts/build-skill.mjs",
     "deploy": "wrangler deploy",
     "build:pages": "node scripts/build-pages.mjs",
-    "deploy:pages": "npm run build:pages && wrangler pages deploy --cwd cloudflare/pages --project-name brclio-pay --branch main --commit-dirty=true",
+    "deploy:pages": "npm run build:pages && node scripts/deploy-pages.mjs",
     "test:runtime": "node scripts/runtime-check.mjs",
     "test:security-runtime": "node scripts/admin-runtime-check.mjs && node scripts/registry-runtime-check.mjs && node scripts/store-runtime-check.mjs",
     "client": "node examples/client.mjs",

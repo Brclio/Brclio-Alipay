@@ -2,6 +2,8 @@
 
 统一支付宝收银中心，入口为 **https://pay.bornforthis.cn**。Cloudflare Worker 执行服务，订单与通知队列保存在 **GitHub 私有仓库**，不使用 D1、KV、R2 或第三方数据库。
 
+2026-10-18 支付服务和公开域名已迁至 Cloudflare `aiyuechuang@gmail.com`，域名及 HTTPS 验证为 active，三个入口通过历史订单只读验证；目标账号的自动发布尚待完成。产品公开地址、原私有账本、历史订单和长期凭据保持不变。迁移及验收边界见[部署说明](docs/deployment.md#2026-10-18-账号迁移进行中)，最终提交和发布记录见[交付状态](docs/status.md)。
+
 支持独立产品后端接入，适用于 `brclio.com`、指定子域名以及通过浏览器打开收银台的桌面和 Android 客户端。支付宝应用：`2021007109602288`。
 
 - [产品接入指南，可直接交给 AI](docs/integration.md)
@@ -26,7 +28,7 @@ npm run dev
 
 ## 自动验证与部署
 
-GitHub 的 `main` 推送、Pull Request 和手动运行会执行 `npm run ci:verify`，只验证代码、构建与 Worker 运行时，不读取支付或部署 Secrets。生产自动部署由 Cloudflare Workers Builds 执行，需先在 Cloudflare 完成仓库绑定；配置步骤与当前状态见[部署文档的自动部署部分](docs/deployment.md#github-自动部署)。GitHub 验证通过不代表生产已经部署。
+GitHub 的 `main` 推送、Pull Request 和手动运行会执行 `npm run ci:verify`，只验证代码、构建与 Worker 运行时，不读取支付或部署 Secrets。生产自动部署方案使用 Cloudflare Workers Builds；迁移后目标账号的授权与构建配置尚待完成，目前使用受控手动发布。配置步骤与当前状态见[部署文档的自动部署部分](docs/deployment.md#github-自动部署)。GitHub 验证通过不代表生产已经部署。
 
 ## 首次设置
 

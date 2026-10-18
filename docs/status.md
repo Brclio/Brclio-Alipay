@@ -1,5 +1,20 @@
 # 交付状态 · 2026-10-18
 
+## 2026-10-18 服务及域名已迁移，自动发布待完成
+
+目标 Cloudflare 账号已由内置浏览器和 Wrangler 双重核实为 aiyuechuang@gmail.com，Account ID 为 `cacceff607775c81f667b7a951d4639f`。Worker `brclio-pay` 与 Direct Upload Pages `brclio-pay-aiyuechuang` 已在目标账号发布，Pages 的 `PAYMENT_BACKEND` 指向同账号支付 Worker。Pages 项目 ID 为 `4be13ccb-e737-4267-8b79-eb59d94c8767`，已验证的首次迁移部署 ID 为 `815dd7cc-438a-4aa2-88ff-71021d98ba90`；最终提交及本轮最终发布 ID 后续补录。Worker 18 项 Text 变量齐全，原 11 项敏感值逐项一致，保留正式环境和原收款开启状态。
+
+`npm run ci:verify` 通过：268 项测试、构建及全部 workerd 运行时检查成功。目标 Worker、目标 Pages 和 `https://pay.bornforthis.cn` 三个入口的 42 次 GET 连续性检查通过：原加密注册表及平台长期凭据保留，固定私有 GitHub main 中 17 个历史 blob 仍可追溯，3 笔历史订单及旧收银台令牌均可读，通知队列与 4 份报表汇总一致。旧账索引覆盖为 3/3；两笔待付款订单只存在正常查单时间更新，未改金额或付款状态。核验脚本没有创建订单或调用支付宝。
+
+用户仅将阿里云 `pay` CNAME 从 `brclio-pay.pages.dev` 改至 `brclio-pay-aiyuechuang.pages.dev`，保留其他 DNS 与根域名 nameserver。`8.8.8.8`、`1.1.1.1` 均解析到目标 Pages；目标自定义域名的 `status`、`verification_data.status`、`validation_data.status` 均为 `active`，公开 HTTPS 请求已通过上述核验。旧 Worker 的 Cron 清空后已回读确认，原 main 自动构建触发器已备份并删除，源活跃触发器为 0。源自定义域名解绑返回成功，解绑后目标三项状态仍均为 active，Worker 与公开域名部署预检全部通过。源 Worker/Pages 默认入口继续保留用于回退。
+
+目标每五分钟 Cron 配置已核对。源 Cron 约于 21:11（上海时间）停用后，账本既有订单查单时间仍推进至 21:20:35（`2026-10-18T13:20:35Z`），构成目标补偿任务运行的间接证据；尚未采集带目标账号归属的调度调用日志，未将其记为独立的定时事件追踪验收。
+
+目标 Workers Builds 自动发布尚未完成：目标 Brclio 连接的 `has_valid_oauth_token=false`，CI/令牌管理 API 返回 403，内置浏览器操作超时，尚需恢复目标 OAuth、配置构建令牌及验证触发器。目前使用受控手动发布，不能将源账号历史 Builds 或 GitHub CI 成功作为目标自动发布成功证据。
+
+账号迁移不搬移或恢复旧账本，不更换商户、平台注册表 key、checkout key、管理员派生配置或产品 API/webhook 长期凭据，不要求产品重新接入。最新变更尚待最终 Git 提交及部署验收记录。本轮没有新增真实到账或产品实际权益开通的验收结论，既有实付证据仍见下文。
+
+
 ## 2026-10-18 环境变量维护
 
 按用户要求，通过系统 Chrome 将支付 Worker 原 11 项 Secret 以同名、原备份值转换为 Text；加上原 7 项运行参数，共 18 项字符串变量。真实值仍只留本机受限备份与 Cloudflare 服务端配置，管理员密码仍使用派生哈希。新增 [环境变量说明](environment-variables.md)，涵盖用途、生成方式、变更影响、恢复及故障定位。
@@ -49,7 +64,7 @@
 
 ## 当前部署
 
-Cloudflare Worker `brclio-pay` 执行支付逻辑和五分钟 Cron，Pages `brclio-pay` 通过 PAYMENT_BACKEND 转发。`pay.bornforthis.cn` 保留阿里云 DNS，CNAME 指向 `brclio-pay.pages.dev`。订单、outbox 和统计索引仍只保存在用户指定的私有仓库 `BrclioData/Brclio-Alipay-Data`，未新增数据库。
+Cloudflare `aiyuechuang@gmail.com`（Account ID `cacceff607775c81f667b7a951d4639f`）的 Worker `brclio-pay` 执行支付逻辑，配置五分钟 Cron；Pages `brclio-pay-aiyuechuang` 通过同账号 PAYMENT_BACKEND 转发。`pay.bornforthis.cn` 保留阿里云 DNS，CNAME 指向 `brclio-pay-aiyuechuang.pages.dev`，目标域名及 HTTPS 验证为 active。订单、outbox 和统计索引仍只保存在用户指定的私有仓库 `BrclioData/Brclio-Alipay-Data`，未新增数据库。源账号默认入口保留回退，Cron 与自动构建已停用；目标自动发布配置尚待完成，最终 Git 提交与本轮发布 ID 后续补录。
 
 管理版本 **0.3.0** 已发布到 Worker 和 Pages。2026-10-14 管理版本交付时，线上 HTTPS 验证指定账户登录、会话、平台/授权/审计读取、月度汇总、订单分页、Skill ZIP、退出及匿名拒绝全部通过。该次管理版本发布没有改变管理密码、商户密钥、注册表加密 key 或收款开关；2026-10-15 的收款开关授权与变更见上文。
 

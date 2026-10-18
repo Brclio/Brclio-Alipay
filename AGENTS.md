@@ -1,6 +1,6 @@
 # Brclio Pay maintenance
 
-- 支付服务运行于 Cloudflare Worker `brclio-pay`；Pages `brclio-pay` 是阿里云外部 DNS 的子域名入口，使用 PAYMENT_BACKEND 服务绑定。保留阿里云 DNS，不改根域名 nameserver。
+- 支付服务目标账号为 Cloudflare `aiyuechuang@gmail.com`（`cacceff607775c81f667b7a951d4639f`），Worker `brclio-pay`；目标 Pages `brclio-pay-aiyuechuang` 是阿里云外部 DNS 的子域名入口，使用同账号 PAYMENT_BACKEND 服务绑定。保留阿里云 DNS，不改根域名 nameserver。旧账号 `hibrclio@gmail.com` 的 Worker/Pages 仅保留回退；迁移是否完成以 `docs/status.md` 的域名、证书、部署及自动构建证据为准。
 - 持久订单与 outbox 仅存 `BrclioData/Brclio-Alipay-Data` 私有仓库；不得引入 D1、KV、R2 或新数据库，除非用户改变该约束。
 - `docs/integration.md` 是产品接入约定，`examples/` 是服务端实现示例。接口变更必须同步文档和示例。
 - `/admin` 是平台接入管理；通用 Skill 位于 `skills/brclio-pay-integrate/`，运行 `node scripts/build-skill.mjs` 同步示例模板和 Worker 内置下载内容。复制的 AI 任务须自包含完整 Skill，并允许用同一受限 Bearer 授权下载包；不能依赖用户另附 ZIP。

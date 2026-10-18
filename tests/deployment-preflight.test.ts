@@ -167,7 +167,7 @@ describe('deployment expectation loading', () => {
     await writeFile(path.join(root, 'public/checkout.html'), html);
     for (const name of ['styles.css', 'admin.css', 'checkout.js', 'landing.js']) await writeFile(path.join(root, 'public', name), name.endsWith('.css') ? 'body{}' : javascript);
     expect(loadDeploymentExpectations(root)).toMatchObject({ version: '1.2.3', paymentMode: 'sandbox', paymentEnabled: true,
-      publicUrl: 'https://pay.example', workerUrl: 'https://brclio-pay.brclio-xhs.workers.dev',
+      publicUrl: 'https://pay.example', workerUrl: 'https://brclio-pay.aiyuechuang.workers.dev',
       adminPageHash: digest(html), adminScriptHash: digest(javascript) });
     expect(loadDeploymentExpectations(root).publicAssets['/styles.css']).toEqual({ hash: digest('body{}'), type: 'css' });
     await writeFile(path.join(root, 'wrangler.jsonc'), '{"vars":{"PAY_BASE_URL":"https://pay.example","PAYMENT_MODE":"live","PAYMENT_ENABLED":"not-boolean"}}');

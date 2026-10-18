@@ -8,7 +8,7 @@ import { fetch, ProxyAgent } from 'undici';
 import ts from 'typescript';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const WORKER_URL = 'https://brclio-pay.brclio-xhs.workers.dev';
+const WORKER_URL = 'https://brclio-pay.aiyuechuang.workers.dev';
 const MAX_ATTEMPTS = 3;
 const MAX_BODY_BYTES = 512 * 1024;
 const hash = value => createHash('sha256').update(value).digest('hex');
