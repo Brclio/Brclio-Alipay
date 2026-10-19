@@ -8,7 +8,15 @@
 
 五分钟 Cron 与批次保持；10 分钟到期即禁止本服务新发起付款，账本 CLOSED 在后续维护或主动刷新时确认，无积压且上游正常时通常为创建后 10–15 分钟。已有 30 分钟签名支付宝链接的期限无法追溯改写，须以上游实际关单为准。
 
-代码验证：`npm run check` 的类型检查、302 项测试及构建通过；`npm run test:runtime` 与 `npm run test:security-runtime` 全通过，新增原生 workerd 关单请求签名及原始响应验签。使用进程内临时测试密钥，无真实付款。发布前两个线上入口及私有账本只读检查通过，5 笔历史订单、1 个事件、2 笔待查订单、0 个待送通知、完整报表索引和原注册表均已核对；脱敏证据为 `secrets/timeout-preflight-20261019.json`。发布和实际旧单收尾在完成后另行记录。
+代码验证：`npm run check` 的类型检查、302 项测试及构建通过；`npm run test:runtime` 与 `npm run test:security-runtime` 全通过，新增原生 workerd 关单请求签名及原始响应验签。使用进程内临时测试密钥，无真实付款。发布前两个线上入口及私有账本只读检查通过，5 笔历史订单、1 个事件、2 笔待查订单、0 个待送通知、完整报表索引和原注册表均已核对；脱敏证据为 `secrets/timeout-preflight-20261019.json`。
+
+行为实现提交为 `02ecee78d0313c1dd2b04efca6039a172d4be2fc`，main 推送自动触发目标 Cloudflare Build `bf5bb9eb-8a1a-469d-aed8-9efcbd1877f9` 并成功完成 `ci:verify`、`npm run deploy` 和 Pages 发布；[同提交 GitHub CI](https://github.com/Brclio/Brclio-Alipay/actions/runs/39207435428) 成功。对应 Worker 版本 `961a20f5-5f47-4294-9cdc-0e17003528bd` 为 100% 流量，Pages 部署 `7548fa47-6b04-4505-af4d-b3e2c1745aa1` 的提交元数据一致。目标账号独立回读确认全部 18 项 Text 原值一致、PAYMENT_BACKEND 保留、五分钟 Cron 保留、域名及证书三项 active；脱敏证据为 `artifacts/payment-timeout-20261019/release-02ecee7.json`。
+
+2026-10-19 14:02–14:03（上海时间），只对原队列中的两笔已过期订单调用已认证 refresh，二者均确认 CLOSED，待查队列由 2 清空为 0，待送通知仍为 0；没有创建新订单、发起付款或人工改写账本。关单记录对应数据提交 `ee0c477db4d00d3cfc2312d8d6e50e8a43fa6189` 和 `64cad8568e640a891a3f30c5a188a06830b822d1`，脱敏执行证据为 `artifacts/payment-timeout-20261019/expired-settlement.json`。本轮不新增真实到账或产品权益开通结论。
+
+发布后 Worker、Pages 默认入口和公开域名的 58 次只读请求验证全部通过：5 笔历史订单、1 个事件、4 份报表汇总、原注册表密文与解密哈希、产品长期凭据和原 checkout token 连续性均保持；只有两笔历史订单由 PENDING 合法推进为 CLOSED，金额、原始期限等购买字段未变，索引覆盖仍为 5/5。证据为 `secrets/timeout-post-release-20261019.json`。
+
+14:06:46（上海时间）跨过 14:05 的下一轮调度窗口后，再次只读核对数据 main 仍为关单后的 `64cad8568e640a891a3f30c5a188a06830b822d1`，没有新增周期提交，订单与通知队列均为 0；证据为 `artifacts/payment-timeout-20261019/ledger-idle.json`。该观察证明本轮旧单收尾后的仓库无新增写入，不替代长期流量与故障重试监测。
 
 ## 2026-10-18 账号迁移与自动发布验收完成
 
