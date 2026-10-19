@@ -137,11 +137,12 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
       let order=await payments.order(id);const client=findClient(env,order.clientId);
       if(action==='refresh')order=await payments.refresh(id);
       if(action==='pay') {
-        requireReady(env,true);requireThat(order.status==='PENDING' && Date.now()+60_000<Date.parse(order.expiresAt),409,'ORDER_NOT_PAYABLE','订单已支付、关闭或即将过期，请返回产品创建新订单');
+        const expiresAt=payments.paymentExpiresAt(order);
+        requireReady(env,true);requireThat(order.status==='PENDING' && Date.now()<Date.parse(expiresAt),409,'ORDER_NOT_PAYABLE','订单已支付、关闭或过期，请返回产品创建新订单');
         requireThat(client.enabled!==false,403,'CLIENT_DISABLED','该平台已暂停新付款');
         const input=parseJson(await readBody(request)) as {channel?:string};
         requireThat(input && ['page','wap'].includes(input.channel || '') && env.ALIPAY_CHANNELS.split(',').includes(input.channel!),400,'CHANNEL_UNAVAILABLE','该支付方式尚未启用');
-        return secure(json({paymentUrl:payments.gateway.paymentUrl({id:order.id,subject:order.subject,totalAmount:order.amount,expiresAt:order.expiresAt},{channel:input.channel as 'page'|'wap',notifyUrl:`${env.PAY_BASE_URL}/api/alipay/notify`,pageReturnUrl:`${env.PAY_BASE_URL}/payment/return`})}));
+        return secure(json({paymentUrl:payments.gateway.paymentUrl({id:order.id,subject:order.subject,totalAmount:order.amount,expiresAt},{channel:input.channel as 'page'|'wap',notifyUrl:`${env.PAY_BASE_URL}/api/alipay/notify`,pageReturnUrl:`${env.PAY_BASE_URL}/payment/return`})}));
       }
       if(action==='refresh' && order.status==='PAID')ctx.waitUntil(payments.deliver(`evt_${id}`,client).catch(()=>console.warn('webhook_delivery_failed')));
       return secure(json(payments.view(order,client)));

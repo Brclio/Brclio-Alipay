@@ -17,6 +17,7 @@ const trade = {
   trade_no: '2026101322001400000000000000', trade_status: 'TRADE_SUCCESS',
   total_amount: '1.00', seller_id: env.ALIPAY_SELLER_ID, send_pay_date: '2026-10-13 20:00:01',
 };
+const closedTrade = { code: '10000', msg: 'Success', out_trade_no: 'pay_test', trade_no: trade.trade_no };
 function signedEnvelope(data: unknown, key = 'alipay_trade_query_response', pretty = false): string {
   const raw = JSON.stringify(data, null, pretty ? 2 : undefined);
   const sign = createSign('RSA-SHA256').update(raw, 'utf8').sign(provider.privateKey, 'base64');
@@ -78,6 +79,76 @@ describe('official Alipay SDK RSA2 adapter', () => {
     await expect(createAlipay(env, transport(rejected)).query('pay_test')).rejects.toMatchObject({ code: 'ALIPAY_QUERY_REJECTED' });
   });
 
+  it('verifies the original close response and signs the requested merchant order', async () => {
+    let requestUrl = '';
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      const alipay = createAlipay(env, transport(signedEnvelope(closedTrade, 'alipay_trade_close_response', true), (url, options) => {
+        requestUrl = url;
+        expect(options?.redirect).toBe('manual');
+        expect(options?.signal).toBeInstanceOf(AbortSignal);
+      }));
+      await expect(alipay.close('pay_test')).resolves.toBeUndefined();
+      const request = verifyRequest(requestUrl);
+      expect(request.hostname).toBe('openapi-sandbox.dl.alipaydev.com');
+      expect(request.searchParams.get('method')).toBe('alipay.trade.close');
+      expect(JSON.parse(request.searchParams.get('biz_content')!)).toEqual({ out_trade_no: 'pay_test' });
+      expect(timeout).toHaveBeenCalledWith(8000);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it('rejects unsigned, tampered, or unrelated close responses', async () => {
+    const signed = signedEnvelope(closedTrade, 'alipay_trade_close_response');
+    const responses = [
+      JSON.stringify({ alipay_trade_close_response: closedTrade }),
+      signed.replace('pay_test', 'pay_other'),
+      signedEnvelope(closedTrade),
+      JSON.stringify({ alipay_trade_close_response: { code: '40004', sub_code: 'ACQ.TRADE_NOT_EXIST' } }),
+    ];
+    for (const response of responses) {
+      await expect(createAlipay(env, transport(response)).close('pay_test')).rejects.toMatchObject({ code: 'ALIPAY_SIGNATURE_INVALID' });
+    }
+  });
+
+  it('requires the verified close success to match the merchant order', async () => {
+    for (const changes of [{ out_trade_no: 'pay_other' }, { out_trade_no: undefined }, { trade_no: 'invalid' }]) {
+      const raw = signedEnvelope({ ...closedTrade, ...changes }, 'alipay_trade_close_response');
+      await expect(createAlipay(env, transport(raw)).close('pay_test')).rejects.toMatchObject({ code: 'ALIPAY_INVALID_RESPONSE' });
+    }
+  });
+
+  it.each(['ACQ.TRADE_NOT_EXIST', 'ACQ.TRADE_STATUS_ERROR', 'ACQ.REASON_ILLEGAL_STATUS', 'ACQ.REASON_TRADE_STATUS_INVALID', 'ACQ.SYSTEM_ERROR'])('does not treat a signed close rejection as success: %s', async sub_code => {
+    for (const key of ['alipay_trade_close_response', 'error_response']) {
+      const raw = signedEnvelope({ code: '40004', sub_code, sub_msg: 'sensitive-provider-detail' }, key);
+      let error: unknown;
+      try { await createAlipay(env, transport(raw)).close('pay_test'); } catch (caught) { error = caught; }
+      expect(error).toMatchObject({ code: 'ALIPAY_CLOSE_REJECTED' });
+      expect(String(error)).not.toContain('sensitive-provider-detail');
+      expect((error as Error).cause).toBeUndefined();
+    }
+  });
+
+  it('rejects close redirects without following or disclosing the signed request', async () => {
+    const send = vi.fn(async (_url: RequestInfo | URL, options?: RequestInit) => {
+      expect(options?.redirect).toBe('manual');
+      return new Response(null, { status: 302, headers: { Location: 'https://untrusted.example/' } });
+    });
+    await expect(createAlipay(env, send as typeof fetch).close('pay_test')).rejects.toMatchObject({ code: 'ALIPAY_HTTP_ERROR' });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects invalid merchant close numbers before sending any request', async () => {
+    const send = vi.fn();
+    await expect(createAlipay(env, send as typeof fetch).close('pay_test&other=trade')).rejects.toThrow('Invalid merchant order number');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(['null', '[]', 'invalid-json'])('rejects a malformed trade response: %s', async raw => {
+    for (const method of ['query', 'close'] as const) {
+      await expect(createAlipay(env, transport(raw))[method]('pay_test')).rejects.toMatchObject({ code: 'ALIPAY_INVALID_RESPONSE' });
+    }
+  });
+
   it('rejects a verified response for another order or invalid amount/status', async () => {
     for (const changes of [{ out_trade_no: 'another' }, { total_amount: 'NaN' }, { trade_status: 'UNKNOWN' }]) {
       await expect(createAlipay(env, transport(signedEnvelope({ ...trade, ...changes }))).query('pay_test')).rejects.toMatchObject({ code: 'ALIPAY_INVALID_RESPONSE' });
@@ -121,15 +192,25 @@ describe('official Alipay SDK RSA2 adapter', () => {
     const now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
     try {
-      const order = { id: 'pay_test', subject: 'Test', totalAmount: '1.00', expiresAt: new Date(now + 30 * 60_000).toISOString() };
+      const order = { id: 'pay_test', subject: 'Test', totalAmount: '1.00', expiresAt: new Date(now + 10 * 60_000).toISOString() };
       const options = { channel: 'wap' as const, pageReturnUrl: 'https://pay.bornforthis.cn/result', notifyUrl: 'https://pay.bornforthis.cn/notify' };
       const first = JSON.parse(new URL(alipay.paymentUrl(order, options)).searchParams.get('biz_content')!);
-      clock.mockReturnValue(now + 29 * 60_000);
+      clock.mockReturnValue(now + 9 * 60_000);
       const reopened = JSON.parse(new URL(alipay.paymentUrl(order, options)).searchParams.get('biz_content')!);
       expect(reopened.time_expire).toBe(first.time_expire);
       expect(reopened.timeout_express).toBeUndefined();
     } finally {
       clock.mockRestore();
+    }
+  });
+
+  it('uses a ten-minute fallback payment deadline for both channels', () => {
+    const alipay = createAlipay(env);
+    for (const channel of ['page', 'wap'] as const) {
+      const url = alipay.paymentUrl({ id: 'pay_test', subject: 'Test', totalAmount: '1.00' }, {
+        channel, pageReturnUrl: 'https://pay.bornforthis.cn/result', notifyUrl: 'https://pay.bornforthis.cn/notify',
+      });
+      expect(JSON.parse(verifyRequest(url).searchParams.get('biz_content')!).timeout_express).toBe('10m');
     }
   });
 
@@ -162,10 +243,10 @@ describe('official Alipay SDK RSA2 adapter', () => {
     expect(message).not.toContain('sensitive-bad-key-fixture');
   });
 
-  it('sanitizes network errors without retaining authenticated request details', async () => {
+  it.each(['query', 'close'] as const)('sanitizes %s network errors without retaining authenticated request details', async method => {
     const alipay = createAlipay(env, (async () => { throw new Error('sensitive-provider-detail'); }) as typeof fetch);
     let error: unknown;
-    try { await alipay.query('pay_test'); } catch (caught) { error = caught; }
+    try { await alipay[method]('pay_test'); } catch (caught) { error = caught; }
     expect(error).toMatchObject({ code: 'ALIPAY_NETWORK_ERROR' });
     expect(String(error)).not.toContain('sensitive-provider-detail');
     expect((error as Error).cause).toBeUndefined();

@@ -13,6 +13,7 @@ let phase = 'bundle';
 let responseStatus;
 let sdkLogCount = 0;
 let nativeQueryCalls = 0;
+let nativeCloseCalls = 0;
 try {
   // Mirror Wrangler's builtin-module shims so CommonJS SDK dependencies import
   // workerd's native Node modules instead of leaving dynamic require() calls.
@@ -56,6 +57,11 @@ try {
   }, null, 2);
   const querySignature = createSign('RSA-SHA256').update(queryData, 'utf8').sign(provider.privateKey, 'base64');
   const queryResponse = `{"alipay_trade_query_response":${queryData},"sign":${JSON.stringify(querySignature)}}`;
+  const closeData = JSON.stringify({
+    code: '10000', msg: 'Success', out_trade_no: 'pay_runtime', trade_no: '2026101322001400000000000000',
+  }, null, 2);
+  const closeSignature = createSign('RSA-SHA256').update(closeData, 'utf8').sign(provider.privateKey, 'base64');
+  const closeResponse = `{"alipay_trade_close_response":${closeData},"sign":${JSON.stringify(closeSignature)}}`;
   const notification = {
     app_id: '2021007109602288', seller_id: sellerId, out_trade_no: 'pay_runtime',
     subject: '中文 100% + 商品', total_amount: '1.00', trade_status: 'TRADE_SUCCESS',
@@ -82,12 +88,15 @@ try {
       outboundService:async request=>{
         const url=new URL(request.url);
         assert.equal(url.origin,'https://openapi-sandbox.dl.alipaydev.com');
-        assert.equal(url.searchParams.get('method'),'alipay.trade.query');
+        const method=url.searchParams.get('method');
+        assert.ok(['alipay.trade.query','alipay.trade.close'].includes(method));
+        assert.deepEqual(JSON.parse(url.searchParams.get('biz_content')), {out_trade_no:'pay_runtime'});
         const fields=new URLSearchParams(url.searchParams);const signature=fields.get('sign');fields.delete('sign');
         const content=[...fields].sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>`${key}=${value}`).join('&');
         assert.equal(createVerify('RSA-SHA256').update(content,'utf8').verify(app.publicKey,signature,'base64'),true);
-        nativeQueryCalls++;
-        return new Response(queryResponse,{headers:{'Content-Type':'application/json'}});
+        if(method==='alipay.trade.close')nativeCloseCalls++;
+        else nativeQueryCalls++;
+        return new Response(method==='alipay.trade.close'?closeResponse:queryResponse,{headers:{'Content-Type':'application/json'}});
       },
       bindings: {
       RUNTIME_TOKEN: runtimeToken,
@@ -98,6 +107,8 @@ try {
       PAYMENT_MODE: 'sandbox',
       QUERY_RESPONSE: queryResponse,
       BAD_QUERY_RESPONSE: queryResponse.replace('TRADE_SUCCESS', 'TRADE_FINISHED'),
+      CLOSE_RESPONSE: closeResponse,
+      BAD_CLOSE_RESPONSE: closeResponse.replace('pay_runtime', 'pay_other'),
       NOTIFICATION_FORM: new URLSearchParams({ ...notification, sign_type: 'RSA2', sign: notificationSignature }).toString(),
       HMAC_SECRET: hmacSecret,
       HMAC_EXPECTED: createHmac('sha256', hmacSecret).update(message, 'utf8').digest('hex'),
@@ -131,7 +142,8 @@ try {
   phase = 'runtime-final-checks';
   assert.equal(sdkLogCount, 0);
   assert.equal(nativeQueryCalls,1);
-  console.log(JSON.stringify({ workerdRuntime: true, ...result.checks, nativeQueryRequestSignature:true, paymentRequestSignature: true, chinaTimestamp: true, sdkLogsSuppressed: true }));
+  assert.equal(nativeCloseCalls,1);
+  console.log(JSON.stringify({ workerdRuntime: true, ...result.checks, nativeQueryRequestSignature:true, nativeCloseRequestSignature:true, paymentRequestSignature: true, chinaTimestamp: true, sdkLogsSuppressed: true }));
 } catch (error) {
   // Avoid printing provider errors, full signed URLs, bindings, or ephemeral keys.
   const errorTypes = new Set(['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'AssertionError']);

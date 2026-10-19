@@ -12,6 +12,9 @@
  * Throw an error with status 401/403 when the product session is no longer authorized.
  * Both adapters should respect signal and verify the session before updating local
  * account state. Call dispose() BEFORE logout/account switch or replacing this order.
+ * This wait timeout is separate from the center's 10-minute payment deadline.
+ * CLOSED ends this wait; keep the old order for late valid paid events/manual checks.
+ * A deliberate repurchase must use a new business order ID, never reopen this one.
  */
 export function createPaymentCompletionWatcher({
   productOrderId,

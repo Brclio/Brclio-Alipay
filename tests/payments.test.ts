@@ -72,8 +72,9 @@ function fixture(send: typeof fetch = vi.fn(async () => new Response('ok', { sta
   const env = environment();
   const store = new MemoryStore();
   const query = vi.fn<Gateway['query']>(async () => null);
+  const close = vi.fn<Gateway['close']>(async () => undefined);
   const gateway: Gateway = {
-    query,
+    query,close,
     verifyNotification: data => safeEqualHex(data.sign || '', signature(data)),
     paymentUrl: () => 'https://openapi.alipay.com/gateway.do',
   };
@@ -90,7 +91,7 @@ function fixture(send: typeof fetch = vi.fn(async () => new Response('ok', { sta
     data.sign = signature(data);
     return data;
   };
-  return { env, store, query, payments, create, notify, setNow: (value: number) => { now = value; } };
+  return { env, store, query, close, payments, create, notify, setNow: (value: number) => { now = value; } };
 }
 
 describe('payment order authority and idempotency', () => {
@@ -99,6 +100,7 @@ describe('payment order authority and idempotency', () => {
     const created = await f.create();
     expect(created.id).toMatch(/^pay_[a-f0-9]{32}$/);
     expect(created.amount).toBe('9.90');
+    expect(created.expiresAt).toBe(new Date(START+10*60_000).toISOString());
     expect(created.checkoutUrl).toContain(`/checkout/${created.id}#token=`);
     expect(await f.payments.order(created.id as string)).toMatchObject({ status: 'PENDING', clientId: client.id, amount: '9.90' });
   });
@@ -262,6 +264,122 @@ describe('verified payment transitions and atomic outbox', () => {
 });
 
 describe('reconciliation and durable delivery', () => {
+  const waiting = (id:string):Trade => ({outTradeNo:id,tradeNo:'2026101322001462921037601726',tradeStatus:'WAIT_BUYER_PAY',totalAmount:'9.90'});
+
+  it('closes an uninitiated order at ten minutes, atomically removing it from future maintenance',async()=>{
+    const f=fixture(),id=String((await f.create()).id);
+    f.setNow(START+10*60_000-1);
+    expect(await f.payments.refresh(id)).toMatchObject({status:'PENDING'});
+    f.setNow(START+10*60_000);
+    const before=f.store.commits.length;
+    expect(await f.payments.refresh(id)).toMatchObject({status:'CLOSED',amount:'9.90'});
+    expect(f.close).not.toHaveBeenCalled();
+    expect(f.store.commits).toHaveLength(before+1);
+    expect(f.store.commits.at(-1)).toEqual(expect.arrayContaining([`orders/${id}.json`,'system/queue.json']));
+    expect(await f.store.readJson('system/queue.json')).toEqual({orders:[],deliveries:[]});
+    expect([...f.store.data.keys()].some(path=>path.startsWith('events/'))).toBe(false);
+    const commits=f.store.commits.length,queries=f.query.mock.calls.length;
+    f.setNow(START+24*3600_000);
+    await f.payments.maintenance([client]);await f.payments.refresh(id);
+    expect(f.store.commits).toHaveLength(commits);
+    expect(f.query).toHaveBeenCalledTimes(queries);
+  });
+
+  it('closes a verified unpaid Alipay trade before persisting CLOSED',async()=>{
+    const f=fixture(),id=String((await f.create()).id);
+    f.query.mockResolvedValue(waiting(id));
+    f.setNow(START+10*60_000);
+    f.close.mockImplementationOnce(async()=>{expect(await f.payments.order(id)).toMatchObject({status:'PENDING'});});
+    expect(await f.payments.refresh(id)).toMatchObject({status:'CLOSED'});
+    expect(f.close).toHaveBeenCalledExactlyOnceWith(id);
+    expect(f.store.commits).toHaveLength(2);
+    expect(await f.store.readJson('system/queue.json')).toEqual({orders:[],deliveries:[]});
+  });
+
+  it('applies the ten minute limit to legacy orders without rewriting their purchase snapshot',async()=>{
+    const f=fixture(),id=String((await f.create()).id);
+    const original={...(await f.payments.order(id)),expiresAt:new Date(START+30*60_000).toISOString()};
+    f.store.data.set(`orders/${id}.json`,original);
+    expect(f.payments.view(original,client).expiresAt).toBe(new Date(START+10*60_000).toISOString());
+    f.setNow(START+11*60_000);
+    await f.payments.maintenance([client]);
+    expect(await f.payments.order(id)).toEqual({...original,status:'CLOSED'});
+    expect(await f.store.readJson('system/queue.json')).toEqual({orders:[],deliveries:[]});
+    const replay=await f.create();
+    expect(replay).toMatchObject({id,status:'CLOSED'});
+    expect((await f.create({productOrderId:'new-purchase'})).id).not.toBe(id);
+  });
+
+  it('never extends an earlier persisted payment deadline',async()=>{
+    const f=fixture(),id=String((await f.create()).id);
+    const original={...(await f.payments.order(id)),expiresAt:new Date(START+5*60_000).toISOString()};
+    f.store.data.set(`orders/${id}.json`,original);f.setNow(START+5*60_000);
+    expect(f.payments.view(original,client).expiresAt).toBe(original.expiresAt);
+    expect(await f.payments.refresh(id)).toMatchObject({status:'CLOSED'});
+  });
+
+  it.each(['query','close'])('retains uncertain expired orders without repeated timestamp commits on %s failure',async failure=>{
+    const f=fixture(),id=String((await f.create()).id),before=await f.payments.order(id);
+    f.setNow(START+10*60_000);
+    if(failure==='query')f.query.mockRejectedValue(new Error('unavailable'));
+    else {f.query.mockResolvedValue(waiting(id));f.close.mockRejectedValue(new Error('unavailable'));}
+    for(let n=0;n<2;n++)await expect(f.payments.refresh(id)).rejects.toThrow('unavailable');
+    expect(await f.payments.order(id)).toEqual(before);
+    expect(await f.store.readJson('system/queue.json')).toEqual({orders:[id],deliveries:[]});
+    expect(f.store.commits).toHaveLength(1);
+  });
+
+  it.each([{totalAmount:'0.01'},{sellerId:'2088999999999999'},{outTradeNo:'pay_'+'0'.repeat(32)}])('does not close a mismatched expired trade: %j',async changed=>{
+    const f=fixture(),id=String((await f.create()).id);
+    f.setNow(START+10*60_000);f.query.mockResolvedValue({...waiting(id),...changed});
+    await expect(f.payments.refresh(id)).rejects.toMatchObject({code:'PAYMENT_MISMATCH'});
+    expect(f.close).not.toHaveBeenCalled();expect(f.store.commits).toHaveLength(1);
+  });
+
+  it('preserves an expired order already paid at Alipay and creates its normal notification',async()=>{
+    const f=fixture(),id=String((await f.create()).id),paidAt=new Date(START+9*60_000).toISOString();
+    f.setNow(START+11*60_000);f.query.mockResolvedValue({...waiting(id),tradeStatus:'TRADE_SUCCESS',paidAt});
+    expect(await f.payments.refresh(id)).toMatchObject({status:'PAID',paidAt});
+    expect(f.close).not.toHaveBeenCalled();
+    expect(await f.store.readJson(`events/evt_${id}.json`)).toMatchObject({event:{data:{paidAt,amount:'9.90'}}});
+  });
+
+  it.each(['TRADE_SUCCESS','TRADE_CLOSED'])('recovers a close race using verified %s state',async tradeStatus=>{
+    const f=fixture(),id=String((await f.create()).id);f.setNow(START+10*60_000);
+    f.query.mockResolvedValueOnce(waiting(id)).mockResolvedValue({...waiting(id),tradeStatus});
+    f.close.mockRejectedValue(new Error('close raced'));
+    expect(await f.payments.refresh(id)).toMatchObject({status:tradeStatus==='TRADE_SUCCESS'?'PAID':'CLOSED'});
+    expect(f.query).toHaveBeenCalledTimes(2);
+    expect(f.store.commits).toHaveLength(2);
+  });
+
+  it('cannot overwrite a concurrent paid notification with CLOSED',async()=>{
+    const f=fixture(),id=String((await f.create()).id);f.setNow(START+10*60_000);
+    f.query.mockResolvedValue(waiting(id));
+    f.close.mockImplementationOnce(async()=>{await f.payments.notification(f.notify(id));});
+    expect(await f.payments.refresh(id)).toMatchObject({status:'PAID'});
+    expect(await f.store.readJson('system/queue.json')).toEqual({orders:[],deliveries:[`evt_${id}`]});
+    expect(f.store.commits).toHaveLength(2);
+  });
+
+  it('keeps concurrent expiry cleanup idempotent and accepts genuine delayed paid notifications',async()=>{
+    const f=fixture(),id=String((await f.create()).id);f.setNow(START+10*60_000);
+    await Promise.all(Array.from({length:4},()=>f.payments.refresh(id)));
+    expect(await f.payments.order(id)).toMatchObject({status:'CLOSED'});expect(f.store.commits).toHaveLength(2);
+    await f.payments.notification(f.notify(id));
+    expect(await f.payments.order(id)).toMatchObject({status:'PAID'});
+    expect([...f.store.data.keys()].filter(path=>path.startsWith('events/'))).toEqual([`events/evt_${id}.json`]);
+  });
+
+  it('continues verifying old queued payments instead of silently dropping them after seven days',async()=>{
+    const f=fixture(),id=String((await f.create()).id);f.setNow(START+8*24*3600_000);
+    f.query.mockRejectedValue(new Error('unavailable'));
+    const warning=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try {await f.payments.maintenance([client]);}finally{warning.mockRestore();}
+    expect(await f.store.readJson('system/queue.json')).toEqual({orders:[id],deliveries:[]});
+    expect(f.store.commits).toHaveLength(1);
+  });
+
   it('reads stored state without writes and throttles active reconciliation', async () => {
     const f = fixture();
     const id = (await f.create()).id as string;
@@ -446,6 +564,76 @@ describe('worker trust boundaries', () => {
       expect(ctx.waitUntil).not.toHaveBeenCalled();
       expect(response.headers.get('Cache-Control')).toBe('no-store');
     } finally { clock.mockRestore(); }
+  });
+
+  it.each(['product','checkout'])('exposes the ten-minute deadline for a legacy pending order through %s GET without rewriting it',async surface=>{
+    const clock=vi.spyOn(Date,'now').mockReturnValue(START);
+    try {
+      const f=fixture(),id=String((await f.create()).id);
+      const original={...(await f.payments.order(id)),expiresAt:new Date(START+30*60_000).toISOString()};
+      f.store.data.set(`orders/${id}.json`,original);
+      const ctx=context();
+      const request=surface==='product'
+        ? sign(f.env,client,`/api/v1/orders/${id}`)
+        : new Request(`${f.env.PAY_BASE_URL}/api/checkout/${id}`,{headers:{Authorization:'Bearer '+checkoutToken(id,f.env)}});
+      const response=await handle(request,f.env,ctx,f.payments);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({id,status:'PENDING',expiresAt:new Date(START+10*60_000).toISOString()});
+      expect(await f.payments.order(id)).toEqual(original);
+      expect(f.store.commits).toHaveLength(1);
+      expect(f.query).not.toHaveBeenCalled();expect(f.close).not.toHaveBeenCalled();
+      expect(ctx.waitUntil).not.toHaveBeenCalled();
+    } finally {clock.mockRestore();}
+  });
+
+  it('retains the original deadline of an already-paid legacy order in product GET',async()=>{
+    const clock=vi.spyOn(Date,'now').mockReturnValue(START);
+    try {
+      const f=fixture(),id=String((await f.create()).id);
+      const expiresAt=new Date(START+30*60_000).toISOString();
+      f.store.data.set(`orders/${id}.json`,{...(await f.payments.order(id)),expiresAt});
+      await f.payments.notification(f.notify(id));
+      const before=await f.payments.order(id),commits=f.store.commits.length,ctx=context();
+      const response=await handle(sign(f.env,client,`/api/v1/orders/${id}`),f.env,ctx,f.payments);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({id,status:'PAID',expiresAt});
+      expect(await f.payments.order(id)).toEqual(before);
+      expect(f.store.commits).toHaveLength(commits);
+      expect(f.query).not.toHaveBeenCalled();expect(f.close).not.toHaveBeenCalled();
+      expect(ctx.waitUntil).not.toHaveBeenCalled();
+    } finally {clock.mockRestore();}
+  });
+
+  it('passes the effective legacy deadline to Alipay at 9:59 and rejects payment at 10:00 without provider calls or writes',async()=>{
+    const clock=vi.spyOn(Date,'now').mockReturnValue(START);
+    try {
+      const f=fixture(),id=String((await f.create()).id);
+      const original={...(await f.payments.order(id)),expiresAt:new Date(START+30*60_000).toISOString()};
+      f.store.data.set(`orders/${id}.json`,original);
+      const paymentUrl=vi.spyOn(f.payments.gateway,'paymentUrl');
+      const request=()=>new Request(`${f.env.PAY_BASE_URL}/api/checkout/${id}/pay`,{
+        method:'POST',headers:{Authorization:'Bearer '+checkoutToken(id,f.env),'Content-Type':'application/json'},
+        body:JSON.stringify({channel:'page'}),
+      });
+      const ctx=context();
+      clock.mockReturnValue(START+9*60_000+59_000);f.setNow(START+9*60_000+59_000);
+      const allowed=await handle(request(),f.env,ctx,f.payments);
+      expect(allowed.status).toBe(200);
+      expect(await allowed.json()).toEqual({paymentUrl:'https://openapi.alipay.com/gateway.do'});
+      expect(paymentUrl).toHaveBeenCalledExactlyOnceWith(
+        {id,subject:original.subject,totalAmount:original.amount,expiresAt:new Date(START+10*60_000).toISOString()},
+        {channel:'page',notifyUrl:`${f.env.PAY_BASE_URL}/api/alipay/notify`,pageReturnUrl:`${f.env.PAY_BASE_URL}/payment/return`},
+      );
+      clock.mockReturnValue(START+10*60_000);f.setNow(START+10*60_000);
+      const expired=await handle(request(),f.env,ctx,f.payments);
+      expect(expired.status).toBe(409);
+      expect(await expired.json()).toMatchObject({error:{code:'ORDER_NOT_PAYABLE'}});
+      expect(paymentUrl).toHaveBeenCalledTimes(1);
+      expect(f.query).not.toHaveBeenCalled();expect(f.close).not.toHaveBeenCalled();
+      expect(await f.payments.order(id)).toEqual(original);
+      expect(f.store.commits).toHaveLength(1);
+      expect(ctx.waitUntil).not.toHaveBeenCalled();
+    } finally {clock.mockRestore();}
   });
 
   it('rejects a signed product query string', async () => {

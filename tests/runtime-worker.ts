@@ -8,6 +8,8 @@ interface RuntimeEnv extends AlipayEnvironment {
   RUNTIME_TOKEN: string;
   QUERY_RESPONSE: string;
   BAD_QUERY_RESPONSE: string;
+  CLOSE_RESPONSE: string;
+  BAD_CLOSE_RESPONSE: string;
   NOTIFICATION_FORM: string;
   HMAC_SECRET: string;
   HMAC_EXPECTED: string;
@@ -27,7 +29,7 @@ export default {
     const alipay = createAlipay(env, fakeTransport(env.QUERY_RESPONSE));
     phase = 'payment-url';
     const paymentUrl = alipay.paymentUrl({
-      id: 'pay_runtime', subject: 'Runtime verification', totalAmount: '1.00', expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+      id: 'pay_runtime', subject: 'Runtime verification', totalAmount: '1.00', expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     }, {
       channel: 'page', pageReturnUrl: 'https://pay.bornforthis.cn/payment/return', notifyUrl: 'https://pay.bornforthis.cn/api/alipay/notify',
     });
@@ -54,6 +56,16 @@ export default {
     const query = await alipay.query('pay_runtime');
     phase = 'native-fetch-query';
     const nativeQuery=await createAlipay(env).query('pay_runtime');
+    phase = 'close';
+    await createAlipay(env, fakeTransport(env.CLOSE_RESPONSE)).close('pay_runtime');
+    phase = 'native-fetch-close';
+    await createAlipay(env).close('pay_runtime');
+    let invalidCloseRejected = false;
+    try {
+      await createAlipay(env, fakeTransport(env.BAD_CLOSE_RESPONSE)).close('pay_runtime');
+    } catch (error) {
+      invalidCloseRejected = typeof error === 'object' && error !== null && 'code' in error && error.code === 'ALIPAY_SIGNATURE_INVALID';
+    }
     const form = Object.fromEntries(new URLSearchParams(env.NOTIFICATION_FORM));
     let invalidRejected = false;
     try {
@@ -72,6 +84,9 @@ export default {
         notification: alipay.verifyNotification(form),
         queryVerified: query?.tradeStatus === 'TRADE_SUCCESS' && query.totalAmount === '1.00' && query.outTradeNo === 'pay_runtime',
         nativeFetchQueryVerified: nativeQuery?.tradeStatus === 'TRADE_SUCCESS' && nativeQuery.totalAmount === '1.00' && nativeQuery.outTradeNo === 'pay_runtime',
+        closeVerified: true,
+        nativeFetchCloseVerified: true,
+        invalidCloseRejected,
         invalidRejected,
         ...diagnostics,
       },

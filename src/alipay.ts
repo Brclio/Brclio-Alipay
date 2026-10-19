@@ -131,6 +131,58 @@ export function createAlipay(env: AlipayEnvironment, fetcher: typeof fetch = glo
     timeout: 8000,
   });
 
+  async function tradeRequest(method: 'alipay.trade.query' | 'alipay.trade.close', outTradeNo: string): Promise<Record<string, unknown>> {
+    assertTradeNo(outTradeNo);
+    // SDK exec() uses urllib's Node transport. Keep the SDK's official RSA2
+    // signing and raw-response verification while using fetch on Cloudflare.
+    const url = sdk.pageExecute(method, 'GET', {
+      timestamp: alipayTimestamp(Date.now()),
+      bizContent: { out_trade_no: outTradeNo },
+    });
+    let raw: string;
+    let traceId: string;
+    try {
+      const response = await fetcher(url, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(8000),
+      });
+      if (response.status !== 200) {
+        await response.body?.cancel();
+        throw new AlipayError('ALIPAY_HTTP_ERROR');
+      }
+      raw = await response.text();
+      if (raw.length > 1024 * 1024) throw new AlipayError('ALIPAY_INVALID_RESPONSE');
+      traceId = response.headers.get('trace_id') ?? '';
+    } catch (error) {
+      if (error instanceof AlipayError) throw error;
+      throw new AlipayError('ALIPAY_NETWORK_ERROR');
+    }
+    let envelope: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+      envelope = parsed as Record<string, unknown>;
+    } catch {
+      throw new AlipayError('ALIPAY_INVALID_RESPONSE');
+    }
+    const expectedKey = `${method.replaceAll('.', '_')}_response`;
+    const responseKey = Object.hasOwn(envelope, expectedKey) ? expectedKey : 'error_response';
+    const signature = envelope.sign;
+    const data = envelope[responseKey];
+    if (typeof signature !== 'string' || !signature || !data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new AlipayError('ALIPAY_SIGNATURE_INVALID', 'Alipay returned an unsigned response');
+    }
+    try {
+      // This validates the original response text, never a JSON reserialization.
+      sdk.checkResponseSign(raw, responseKey, signature, traceId);
+    } catch {
+      throw new AlipayError('ALIPAY_SIGNATURE_INVALID', 'Alipay response signature is invalid');
+    }
+    return data as Record<string, unknown>;
+  }
+
   return {
     paymentUrl(order: PayableOrder, options: PaymentUrlOptions): string {
       assertTradeNo(order.id);
@@ -143,7 +195,7 @@ export function createAlipay(env: AlipayEnvironment, fetcher: typeof fetch = glo
       // deadline. Relative WAP deadlines may be rounded up by Alipay to 5m.
       const expiry = order.expiresAt ? {
         time_expire: alipayTimestamp(Date.parse(order.expiresAt)),
-      } : { timeout_express: '30m' };
+      } : { timeout_express: '10m' };
       if (options.channel !== 'page' && options.channel !== 'wap') throw new TypeError('Unsupported Alipay channel');
       return sdk.pageExecute(options.channel === 'page' ? 'alipay.trade.page.pay' : 'alipay.trade.wap.pay', 'GET', {
         timestamp: alipayTimestamp(Date.now()),
@@ -161,51 +213,7 @@ export function createAlipay(env: AlipayEnvironment, fetcher: typeof fetch = glo
     },
 
     async query(outTradeNo: string): Promise<AlipayQueryResult | null> {
-      assertTradeNo(outTradeNo);
-      // SDK exec() uses urllib's Node transport. Keep the SDK's official RSA2
-      // signing and raw-response verification while using fetch on Cloudflare.
-      const url = sdk.pageExecute('alipay.trade.query', 'GET', {
-        timestamp: alipayTimestamp(Date.now()),
-        bizContent: { out_trade_no: outTradeNo },
-      });
-      let raw: string;
-      let traceId: string;
-      try {
-        const response = await fetcher(url, {
-          method: 'GET',
-          headers: { accept: 'application/json' },
-          redirect: 'manual',
-          signal: AbortSignal.timeout(8000),
-        });
-        if (response.status !== 200) {
-          await response.body?.cancel();
-          throw new AlipayError('ALIPAY_HTTP_ERROR');
-        }
-        raw = await response.text();
-        if (raw.length > 1024 * 1024) throw new AlipayError('ALIPAY_INVALID_RESPONSE');
-        traceId = response.headers.get('trace_id') ?? '';
-      } catch (error) {
-        if (error instanceof AlipayError) throw error;
-        throw new AlipayError('ALIPAY_NETWORK_ERROR');
-      }
-      let envelope: Record<string, unknown>;
-      try {
-        envelope = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        throw new AlipayError('ALIPAY_INVALID_RESPONSE');
-      }
-      const responseKey = Object.hasOwn(envelope, 'alipay_trade_query_response') ? 'alipay_trade_query_response' : 'error_response';
-      const signature = envelope.sign;
-      if (typeof signature !== 'string' || !signature || !envelope[responseKey] || typeof envelope[responseKey] !== 'object') {
-        throw new AlipayError('ALIPAY_SIGNATURE_INVALID', 'Alipay returned an unsigned response');
-      }
-      try {
-        // This validates the original response text, never a JSON reserialization.
-        sdk.checkResponseSign(raw, responseKey, signature, traceId);
-      } catch {
-        throw new AlipayError('ALIPAY_SIGNATURE_INVALID', 'Alipay response signature is invalid');
-      }
-      const data = envelope[responseKey] as Record<string, unknown>;
+      const data = await tradeRequest('alipay.trade.query', outTradeNo);
       if (data.sub_code === 'ACQ.TRADE_NOT_EXIST') return null;
       if (data.code !== '10000') throw new AlipayError('ALIPAY_QUERY_REJECTED');
       if (data.out_trade_no !== outTradeNo || typeof data.trade_no !== 'string' || !/^\d{16,64}$/.test(data.trade_no)
@@ -222,6 +230,17 @@ export function createAlipay(env: AlipayEnvironment, fetcher: typeof fetch = glo
         ...(typeof data.buyer_user_id === 'string' ? { buyerId: data.buyer_user_id } : {}),
         ...(paymentTime ? { paidAt: paymentTime } : {}),
       };
+    },
+
+    async close(outTradeNo: string): Promise<void> {
+      const data = await tradeRequest('alipay.trade.close', outTradeNo);
+      // A missing trade or a state race is not a successful close. The caller
+      // must query again before deciding whether the order is closed or paid.
+      if (data.code !== '10000') throw new AlipayError('ALIPAY_CLOSE_REJECTED');
+      if (data.out_trade_no !== outTradeNo || (data.trade_no !== undefined
+        && (typeof data.trade_no !== 'string' || !/^\d{16,64}$/.test(data.trade_no)))) {
+        throw new AlipayError('ALIPAY_INVALID_RESPONSE');
+      }
     },
 
     verifyNotification(form: Record<string, string>): boolean {

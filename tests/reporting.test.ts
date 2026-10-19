@@ -17,7 +17,7 @@ const client:ProductClient={id:'brclio',name:'Brclio',apiSecret:'a'.repeat(40),w
 function fixture(store=new MemoryStore(),mode:Order['mode']='live'){
   let now=START;
   const env={PAYMENT_MODE:mode,PAY_BASE_URL:'https://pay.bornforthis.cn',ALIPAY_CHANNELS:'page',ALIPAY_SELLER_ID:'2088000000000000',CHECKOUT_SECRET:'c'.repeat(40)} as Env;
-  const gateway:Gateway={query:async()=>null,verifyNotification:()=>true,paymentUrl:()=>''};
+  const gateway:Gateway={query:async()=>null,close:async()=>{},verifyNotification:()=>true,paymentUrl:()=>''};
   const send=vi.fn(async()=>new Response(null,{status:204}));
   const payments=new Payments(env,store,gateway,()=>now,send as typeof fetch),report=new Reporting(store,mode,()=>now);
   const create=(productOrderId='business-1',product=client)=>payments.create(product,{productOrderId,sku:'pro',returnUrl:'https://brclio.com/account'});

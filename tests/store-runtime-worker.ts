@@ -39,7 +39,7 @@ async function webhook(url: string): Promise<{ delivered: boolean; rejectedRedir
   };
   const client: ProductClient = { id: 'fixture', name: 'Fixture', apiSecret: 'fixture-api-'.repeat(4), webhookSecret: 'fixture-webhook-'.repeat(4),
     webhookUrl: url, returnOrigins: ['https://product.runtime.invalid'], skus: { pro: { subject: 'Fixture', amount: '1.00' } } };
-  const gateway: Gateway = { query: async () => null, verifyNotification: () => false, paymentUrl: () => '' };
+  const gateway: Gateway = { query: async () => null, close: async () => {}, verifyNotification: () => false, paymentUrl: () => '' };
   const payments = new Payments({ PAYMENT_MODE: 'live' } as Env, store, gateway, () => now);
   await payments.deliver(eventId, client);
   const delivery = values.get(`events/${eventId}.json`);

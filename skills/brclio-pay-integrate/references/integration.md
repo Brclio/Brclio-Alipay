@@ -48,13 +48,17 @@ detect 必须确认币种；中心只有人民币 CNY。项目现有 USD 等外�
 - `GET /api/v1/catalog`：读取当前产品公开目录 `{clientId,name,enabled,acceptingPayments,mode,currency:'CNY',version,skus:{SKU:{subject,amount,enabled,description?,entitlement?}}}`，不含凭证。`enabled` 为产品状态，`acceptingPayments` 为总开关与该产品均允许新购买；关闭收款仍可读配置齐全的目录。`acceptingPayments=false`、产品停用或商品停售应停止新购买，保留价格、已有订单查单与权益处理。刷新目录可恢复购买；开关变化不改变商品版本。此状态不证明支付宝权限、到账或实际开通。
 - `POST /api/v1/orders`，JSON `{productOrderId,sku,returnUrl}`；返回付款订单与包含令牌 fragment 的 `checkoutUrl`。
 - `GET /api/v1/orders/:id`，读取持久化状态。
-- `POST /api/v1/orders/:id/refresh`，请求受节流的补偿查询，可发送 `{}`。
+- `POST /api/v1/orders/:id/refresh`，未到期时请求受 60 秒节流的补偿查询，到期时执行关单收尾，可发送 `{}`。
 
 头字段为 `X-Brclio-Client`、`X-Brclio-Timestamp`（Unix 秒）、`X-Brclio-Nonce`（`[A-Za-z0-9_-]{16,80}`）和 `X-Brclio-Signature`（十六进制 HMAC-SHA256）。允许时间偏差为 5 分钟。服务端 API 不接受 query string。
 
 签名原文为 `METHOD_UPPERCASE + '\n' + pathname + '\n' + timestamp + '\n' + nonce + '\n' + sha256_hex(rawBody)`，末尾无额外换行。GET 的 body 为空字符串。签名后不能改变 JSON 空白、顺序或编码。
 
 `(clientId, productOrderId)` 保持唯一。相同内容重复创建取得同一付款订单；修改 SKU 或返回地址应使用新的业务订单号。保持原产品业务订单、用户和购买资格为权威，不让客户端改价。付款状态包括 `PENDING`、`PAID`、`CLOSED`；权益投递状态 `delivered` 仅表示产品确认接收通知。
+
+订单返回 `expiresAt`，付款期限为创建后 10 分钟，旧 `PENDING` 同样按原 `createdAt + 10 分钟` 收尾。到期立即禁止发起付款；幂等重试不会延长原期限，已关闭或到期后重购须新建业务订单号。中心每 5 分钟的后台任务或主动刷新会先验签查询支付宝：已付正常确认；存在未付款交易时先取得关单成功确认；确认交易不存在或已关闭才记录 `CLOSED`。查询/关单异常时暂留 `PENDING` 并重试，不能继续付款。关闭与移出补查队列、报表更新同事务，成功后停止周期补查；无积压且上游正常时，通常在创建后约 10–15 分钟关闭。
+
+到期收尾不预写 `lastCheckedAt`，查询或关单失败不产生仅更新时间戳的提交。历史已签发的 30 分钟支付宝链接不能追溯改写其 `time_expire`，本地到期拒绝重新发起不能代替上游关单。保留旧业务订单与历史金额、权益快照；迟到有效付款通知仍可将中心 `CLOSED` 恢复为 `PAID`，产品不能只因本地到期或已关闭就拒绝真实付款，仍须验签核对并幂等履约。
 
 模板提供 `pay.catalog()`。产品通过自己的后端读取目录展示/校验启用商品，不缓存或明确短缓存；不能把支付凭证给客户端，也不能将价格长期固化在构建产物里。只有实现了目录读取的产品会读取后台新价，旧产品不会凭空自动更新。目录 entitlement 仅说明，实际开通规则修改仍需产品实现。`acceptingPayments` 是兼容新增字段，旧服务未返回不代表已开放收款；创建/发起付款仍可能返回 `503 / PAYMENTS_DISABLED`。模板错误提供 `code` 和 `status`，产品应以固定脱敏文案说明收款未开放，保留原业务订单供恢复后幂等重试，不连续盲重试，也不影响旧单通知和查单。
 
@@ -101,10 +105,10 @@ await watcher.start();
 
 `productApi` 与 `renderPaymentProgress` 需要适配产品现有接口/UI。queryOrder 返回上述归一化结构；两个适配器都要传递 signal，并在写入账号缓存前复核当前会话。移动端按自身 resume 生命周期启动/恢复等待并清理监听。状态回调为 `{productOrderId,status,code?}`，status 是 pending/confirming/confirmed/closed/error/timeout；code 为固定脱敏错误标识。
 
-下单后保存按用户隔离的待核实业务订单引用，别记录 checkoutUrl 的访问 token。网页返回、桌面 focus、移动 resume、重启恢复都启动同一等待流程；默认每 15 秒、最多 5 分钟，隐藏暂停、恢复立即查询、避免并发。PAID 而权益 pending 时继续等待，确认后刷新徽标、到期时间和实际功能权限。超时保留原订单与手动查询，不提示重复付款；退出/切换账号 dispose 旧等待，忽略迟到结果。安装包产品必须发布并验证安装后的新前端，网页发布不会更新旧安装包。
+下单后保存按用户隔离的待核实业务订单引用，别记录 checkoutUrl 的访问 token。网页返回、桌面 focus、移动 resume、重启恢复都启动同一等待流程；默认每 15 秒、最多 5 分钟，隐藏暂停、恢复立即查询、避免并发。PAID 而权益 pending 时继续等待，确认后刷新徽标、到期时间和实际功能权限。客户端等待超时不等于服务端订单已关闭，保留原订单与手动查询，不提示重复付款；收到 `CLOSED` 时结束本轮等待，可提供以新业务订单号重新购买的入口，保留原单查证与迟到有效付款处理。退出/切换账号 dispose 旧等待，忽略迟到结果。安装包产品必须发布并验证安装后的新前端，网页发布不会更新旧安装包。
 
 ## 从产品项目部署和开放
 
 用户已授权接入、部署与上线时，在产品仓库完成 Secret、回调/查单/返回页部署和客户端发布，不停在 plan/apply 成功。中心 health 的 ready/acceptingPayments、签名目录的 enabled/acceptingPayments 均为 true、环境与可售商品匹配后，可按授权直接开放产品购买入口，无须回支付仓库重复改总开关或部署。新产品可在创建计划中登记 enabled:true；已有产品除本次任务明确要求恢复外保留状态。上线前限制未完成验证的购买入口。
 
-总开关 false 或商户能力缺失超出单平台授权，只报告具体阻塞，不修改商户或索取全账号凭证。固定来源不足、授权过期或产品发布权限不足同样明确列出必要步骤。真实付款由用户在产品项目人工完成，分别核对中心付款、通知、产品实际权益和客户端显示。测试覆盖回调延迟、付款晚于回跳、focus/resume、重启恢复、退出/切换账号、超时手动恢复及重复回调。
+总开关 false 或商户能力缺失超出单平台授权，只报告具体阻塞，不修改商户或索取全账号凭证。固定来源不足、授权过期或产品发布权限不足同样明确列出必要步骤。真实付款由用户在产品项目人工完成，分别核对中心付款、通知、产品实际权益和客户端显示。测试覆盖回调延迟、付款晚于回跳、10 分钟到期禁止付款、关闭后新业务订单重购、旧单迟到有效付款幂等履约、focus/resume、重启恢复、退出/切换账号、等待超时手动恢复及重复回调。

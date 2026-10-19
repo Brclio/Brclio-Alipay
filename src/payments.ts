@@ -7,7 +7,8 @@ import {alipayPaidAt} from './alipay-time';
 export interface Trade {
   outTradeNo: string; tradeNo: string; tradeStatus: string; totalAmount: string; sellerId?: string; paidAt?: string;
 }
-export interface Gateway {query(id:string):Promise<Trade|null>;verifyNotification(data:Record<string,string>):boolean;paymentUrl(order:{id:string;subject:string;totalAmount:string;expiresAt?:string},options:{channel:'page'|'wap';pageReturnUrl:string;notifyUrl:string}):string}
+export interface Gateway {query(id:string):Promise<Trade|null>;close(id:string):Promise<void>;verifyNotification(data:Record<string,string>):boolean;paymentUrl(order:{id:string;subject:string;totalAmount:string;expiresAt?:string},options:{channel:'page'|'wap';pageReturnUrl:string;notifyUrl:string}):string}
+const PAYMENT_WINDOW_MS = 10 * 60_000;
 const orderPath = (id:string) => `orders/${id}.json`;
 const eventId = (id:string) => `evt_${id}`;
 const deliveryPath = (id:string) => `events/${id}.json`;
@@ -57,7 +58,7 @@ export class Payments {
       const requestHash=sha256(JSON.stringify({productOrderId:input.productOrderId,sku:input.sku,returnUrl,amount:item.amount,subject:item.subject}));
       const queue = await tx.read<WorkQueue>('system/queue.json') || emptyQueue();
       requireThat(queue.orders.length < 2000,503,'CAPACITY','待支付订单过多，请稍后再试');
-      const created:Order = {id,mode:this.env.PAYMENT_MODE,clientId:client.id,productOrderId:input.productOrderId as string,sku:input.sku as string,subject:item.subject,amount:money(item.amount),status:'PENDING',createdAt:new Date(now).toISOString(),expiresAt:new Date(now+30*60_000).toISOString(),returnUrl,requestHash,fulfillmentStatus:'pending'};
+      const created:Order = {id,mode:this.env.PAYMENT_MODE,clientId:client.id,productOrderId:input.productOrderId as string,sku:input.sku as string,subject:item.subject,amount:money(item.amount),status:'PENDING',createdAt:new Date(now).toISOString(),expiresAt:new Date(now+PAYMENT_WINDOW_MS).toISOString(),returnUrl,requestHash,fulfillmentStatus:'pending'};
       tx.put(orderPath(id),created); tx.put(index,{id});
       queue.orders.push(id); tx.put('system/queue.json',queue);
       await indexOrder(tx,created);
@@ -66,7 +67,12 @@ export class Payments {
     return {...this.view(order,client), checkoutUrl:`${this.env.PAY_BASE_URL}/checkout/${order.id}#token=${checkoutToken(order.id,this.env)}`, productOrderId:order.productOrderId,sku:order.sku};
   }
   view(order:Order,client:ProductClient) {
-    return {id:order.id,subject:order.subject,amount:order.amount,currency:'CNY',status:order.status,productName:client.name,expiresAt:order.expiresAt,returnUrl:this.returnUrl(order),fulfillmentStatus:order.fulfillmentStatus,mode:order.mode,channels:this.env.ALIPAY_CHANNELS.split(',')};
+    return {id:order.id,subject:order.subject,amount:order.amount,currency:'CNY',status:order.status,productName:client.name,expiresAt:this.paymentExpiresAt(order),returnUrl:this.returnUrl(order),fulfillmentStatus:order.fulfillmentStatus,mode:order.mode,channels:this.env.ALIPAY_CHANNELS.split(',')};
+  }
+  paymentExpiresAt(order:Order):string {
+    // Apply the shorter policy to legacy pending purchases without rewriting
+    // their original purchase snapshots or extending an earlier deadline.
+    return order.status==='PENDING' ? new Date(Math.min(Date.parse(order.expiresAt),Date.parse(order.createdAt)+PAYMENT_WINDOW_MS)).toISOString() : order.expiresAt;
   }
   returnUrl(order:Order):string {
     const url = new URL(order.returnUrl); url.searchParams.set('payment_order_id',order.id); url.searchParams.set('product_order_id',order.productOrderId); return url.toString();
@@ -119,15 +125,57 @@ export class Payments {
       const order = await tx.read<Order>(orderPath(id));
       requireThat(order,404,'NOT_FOUND','订单不存在');
       requireThat(order.mode===this.env.PAYMENT_MODE,409,'ENVIRONMENT_MISMATCH','订单不属于当前支付环境');
-      if (order.status!=='PENDING' || (order.lastCheckedAt && now-Date.parse(order.lastCheckedAt)<60_000)) return false;
-      order.lastCheckedAt=new Date(now).toISOString();tx.put(orderPath(id),order);return true;
+      if (order.status!=='PENDING') return null;
+      const expired=now>=Date.parse(this.paymentExpiresAt(order));
+      // Expired orders no longer persist an endless stream of check timestamps.
+      // Provider confirmation and the final CLOSED/queue update remain durable.
+      if (!expired) {
+        if (order.lastCheckedAt && now-Date.parse(order.lastCheckedAt)<60_000) return null;
+        order.lastCheckedAt=new Date(now).toISOString();tx.put(orderPath(id),order);
+      }
+      return {expired};
     });
     if (claimed) {
       const trade = await this.gateway.query(id);
       requireThat(!trade || trade.outTradeNo === id,502,'PAYMENT_MISMATCH','查询交易号不匹配');
-      if (trade) await this.applyTrade(trade);
+      if (trade) {
+        const order=await this.applyTrade(trade);
+        if (order.status!=='PENDING') return order;
+      }
+      if (claimed.expired) {
+        if (trade) {
+          try {await this.gateway.close(id);}
+          catch (error) {
+            // Payment may win the race with close. Trust only a fresh verified
+            // provider result; never turn an uncertain failure into local CLOSED.
+            const current=await this.gateway.query(id);
+            requireThat(!current || current.outTradeNo===id,502,'PAYMENT_MISMATCH','查询交易号不匹配');
+            if (current) {
+              const order=await this.applyTrade(current);
+              if (order.status!=='PENDING') return order;
+            }
+            throw error;
+          }
+        }
+        return this.closeExpired(id);
+      }
     }
     return this.order(id);
+  }
+  private async closeExpired(id:string):Promise<Order> {
+    return this.store.transaction(async tx=>{
+      const order=await tx.read<Order>(orderPath(id));
+      requireThat(order,404,'NOT_FOUND','订单不存在');
+      requireThat(order.mode===this.env.PAYMENT_MODE,409,'ENVIRONMENT_MISMATCH','订单不属于当前支付环境');
+      // A notification can have confirmed payment while the close was in flight.
+      if (order.status!=='PENDING' || this.now()<Date.parse(this.paymentExpiresAt(order))) return order;
+      order.status='CLOSED';
+      const queue=await tx.read<WorkQueue>('system/queue.json') || emptyQueue();
+      queue.orders=queue.orders.filter(x=>x!==id);
+      tx.put(orderPath(id),order);tx.put('system/queue.json',queue);
+      await indexOrder(tx,order);
+      return order;
+    });
   }
   async deliver(id:string,client:ProductClient):Promise<void> {
     const now = this.now(); const leaseId=randomId('lease_');
@@ -170,10 +218,7 @@ export class Payments {
     });
     for (const id of batch.orders) {
       try {
-        const order=await this.order(id);
-        if (this.now()-Date.parse(order.createdAt)>7*24*3600_000) {
-          await this.store.transaction(async tx=>{const q=await tx.read<WorkQueue>('system/queue.json') || emptyQueue();q.orders=q.orders.filter(x=>x!==id);tx.put('system/queue.json',q);});
-        } else await this.refresh(id);
+        await this.refresh(id);
       } catch {console.warn('reconciliation_failed');}
     }
     for (const id of batch.deliveries) {

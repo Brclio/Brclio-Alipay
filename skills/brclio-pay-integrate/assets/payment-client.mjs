@@ -24,6 +24,8 @@ export function createPaymentClient({baseUrl='https://pay.bornforthis.cn',client
     // Read through the product backend; do not cache indefinitely in a frontend or build.
     // acceptingPayments=false pauses new purchases; keep catalog prices and existing order/status flows.
     catalog:()=>call('GET','/api/v1/catalog'),
+    // Orders expire 10 minutes after creation. Idempotent retries keep the original
+    // deadline/status; a deliberate repurchase needs a NEW productOrderId.
     createOrder:({productOrderId,sku,returnUrl})=>call('POST','/api/v1/orders',{productOrderId,sku,returnUrl}),
     getOrder:id=>call('GET',`/api/v1/orders/${checkedId(id)}`),
     refreshOrder:id=>call('POST',`/api/v1/orders/${checkedId(id)}/refresh`,{})

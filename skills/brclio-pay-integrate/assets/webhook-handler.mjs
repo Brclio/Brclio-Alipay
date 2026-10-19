@@ -9,8 +9,10 @@ export function createWebhookHandler({clientId,webhookSecret,applyEntitlement}) 
     try{event=verifyPaymentEvent({rawBody,headers:request.headers,webhookSecret,clientId});}
     catch{return new Response('invalid event',{status:401});}
     try {
-      // In one transaction: match your pending order's owner, SKU and amount snapshot;
+      // In one transaction: match the stored order's owner, SKU and amount snapshot;
       // never compare an old order with today's catalog price after a price change.
+      // Keep expired/closed business orders: a late valid paid event must still be
+      // reconciled and fulfilled once; local expiry alone cannot disprove payment.
       // Insert event.id uniquely; grant its stored entitlement/version; mark the order paid.
       // A duplicate committed event must also succeed. Never rely on redirect parameters.
       await applyEntitlement(event);
