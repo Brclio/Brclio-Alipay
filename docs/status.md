@@ -10,7 +10,11 @@
 
 详情显示付款尝试、风险窗口、额外到账和最近 20 项人工操作；完整操作记录继续留仓。付款链接只在当前页面短暂显示，离开或过期清除。CSV 保留原单金额并增加额外实付笔数/金额。通用 Skill、接入说明和示例已同步，普通产品 API 不获得管理员操作权限。
 
-本地验证：`npm run check` 的类型检查、391 项自动化测试和 Worker 构建通过，`npm run test:runtime`、`npm run test:security-runtime` 全通过；新增原生 Worker 手动关单、重新启用、尝试映射、单次权益和审计测试。浏览器使用假数据完成桌面及 390×844 窄屏操作，未调用真实支付宝或写入生产账本。发布前 46 次只读请求核对原注册表、长期凭据、5 笔历史订单、1 个事件、4 份报表及原 checkout token 均通过，索引覆盖 5/5、订单/通知队列均为 0；证据为 `secrets/admin-order-actions-preflight-20261019.json`。线上发布证据在完成后单独记录，不把模拟操作当作真实到账或产品开通验收。
+本地验证：`npm run check` 的类型检查、391 项自动化测试和 Worker 构建通过，`npm run test:runtime`、`npm run test:security-runtime` 全通过；新增原生 Worker 手动关单、重新启用、尝试映射、单次权益和审计测试。浏览器使用假数据完成桌面及 390×844 窄屏操作，未调用真实支付宝或写入生产账本。发布前 46 次只读请求核对原注册表、长期凭据、5 笔历史订单、1 个事件、4 份报表及原 checkout token 均通过，索引覆盖 5/5、订单/通知队列均为 0；证据为 `secrets/admin-order-actions-preflight-20261019.json`。
+
+首次功能发布提交为 `283c0fce9a8204c3bdb155317125edeca74a56d5`，目标 main 自动触发 Cloudflare Build `9155998d-344a-4e8a-aa93-81d8e9ac498a`，`ci:verify`、Worker/Pages 双发布及部署预检全部成功；[同提交 GitHub CI](https://github.com/Brclio/Brclio-Alipay/actions/runs/39212909316) 成功。对应 Worker 版本为 `23abfd57-b2f5-4ec9-8c00-f4c70fcababd`，100% 流量；Pages 部署 `51b47e86-ef59-4725-bbf7-228a6661786e` 元数据匹配提交，PAYMENT_BACKEND 仍指向同账号 brclio-pay。独立回读全部 18 项 Text 原值一致、五分钟 Cron 保留、域名/证书三项 active；证据为 `artifacts/admin-order-actions-20261019/release-283c0fc.json`。
+
+发布后 Worker 和公开域名的静态资源哈希、页面与匿名保护部署预检通过；两入口的新订单详情及 close/reopen/reconcile 四条管理接口均对匿名请求返回 401/no-store，新按钮与原因确认表单已显示。另以 34 次只读请求完成公开入口与原私有账本的连续性核验：5 笔历史订单、1 个事件、4 份报表、原注册表与长期凭据、旧 checkout token 保持，数据 main 仍为 `64cad8568e640a891a3f30c5a188a06830b822d1`，没有新增生产订单或人工操作记录。证据为 `artifacts/admin-order-actions-20261019/admin-boundary.json`、`secrets/admin-order-actions-public-post-release-20261019.json`。本轮没有登录生产管理员执行真实订单变更、没有新增实付或产品实际开通验收，不把假数据演示、页面显示或部署成功当作真实资金与权益证据。
 
 ## 2026-10-19 十分钟未付款关单
 
