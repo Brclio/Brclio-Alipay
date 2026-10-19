@@ -97,6 +97,32 @@ describe('atomic payment reporting',()=>{
     await expect(f.pay(String(id))).rejects.toMatchObject({code:'REPORTING_INTEGRITY'});
     expect((await f.payments.order(String(id))).status).toBe('PENDING');expect([...f.store.data.keys()].filter(path=>path.startsWith('events/'))).toEqual([]);
   });
+  it('counts distinct additional receipts on their Shanghai payment dates while keeping one original-price order',async()=>{
+    const f=fixture(),extra={attemptId:'pay_'+'e'.repeat(32),tradeNo:'2026101922001400000000000002',paidAt:'2026-10-31T16:01:00.000Z',amount:'9.90'};
+    const order=legacy(20,{amount:'9.90',paidAt:'2026-10-31T15:59:00.000Z',duplicatePayments:[extra]});
+    await seed(f.store,order,true);
+    const october=await f.report.summary({month:'2026-10'}),november=await f.report.summary({month:'2026-11'});
+    expect(october).toMatchObject({paidCount:1,paidAmountCents:990,deliveryPendingCount:1,allTime:{paidCount:2,paidAmountCents:1980}});
+    expect(october.daily[30]).toMatchObject({date:'2026-10-31',paidCount:1,paidAmountCents:990});
+    expect(november).toMatchObject({paidCount:1,paidAmountCents:990,deliveryPendingCount:0,allTime:{paidCount:2,paidAmountCents:1980}});
+    expect(november.daily[0]).toMatchObject({date:'2026-11-01',paidCount:1,paidAmountCents:990});
+    const rows=(await f.report.orders()).items;expect(rows).toHaveLength(1);expect(rows[0]).toMatchObject({amount:'9.90',amountCents:990,duplicatePayments:[extra]});
+    const commits=f.store.commits.length;await f.store.transaction(tx=>indexOrder(tx,order));expect(f.store.commits).toHaveLength(commits);
+    expect(await new Reporting(f.store,'sandbox').summary({month:'2026-11'})).toMatchObject({paidCount:0,paidAmountCents:0});
+  });
+  it.each(['delete','change-date','change-amount'])('rejects attempts to %s an already indexed additional receipt without changing the ledger',async change=>{
+    const f=fixture(),extra={attemptId:'pay_'+'e'.repeat(32),tradeNo:'2026101922001400000000000002',paidAt:new Date(START).toISOString(),amount:'9.90'};
+    const order=legacy(21,{amount:'9.90',duplicatePayments:[extra]});await seed(f.store,order,true);
+    const after={...order,duplicatePayments:change==='delete'?[]:[{...extra,...(change==='change-date'?{paidAt:new Date(START+60000).toISOString()}:{amount:'0.01'})}]};
+    await expect(seed(f.store,after,true)).rejects.toMatchObject({code:'REPORTING_INTEGRITY'});
+    expect(await f.store.readJson(`orders/${order.id}.json`)).toEqual(order);
+    expect(await f.report.summary({month:'2026-10'})).toMatchObject({paidCount:2,paidAmountCents:1980});
+  });
+  it('rejects duplicated transaction identities in additional receipt data',async()=>{
+    const f=fixture(),extra={attemptId:'pay_'+'e'.repeat(32),tradeNo:'2026101322001400000000000001',paidAt:new Date(START).toISOString(),amount:'0.01'};
+    await expect(seed(f.store,legacy(22,{duplicatePayments:[extra]}),true)).rejects.toMatchObject({code:'REPORTING_INTEGRITY'});
+    expect(f.store.data.size).toBe(0);
+  });
 });
 
 describe('historical coverage and resumable rebuild',()=>{

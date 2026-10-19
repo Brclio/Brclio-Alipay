@@ -59,7 +59,12 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
       const value={service:'Brclio Pay',version:'0.3.0',ready,acceptingPayments:ready && env.PAYMENT_ENABLED==='true',mode:env.PAYMENT_MODE || 'live'};
       healthCache={key,until:Date.now()+15000,value};return secure(json(value));
     }
-    if(path.startsWith('/api/admin/'))return secure(await handleAdmin(request,env,provided?.store || storeFor(env)));
+    if(path.startsWith('/api/admin/'))return secure(await handleAdmin(request,env,provided?.store || storeFor(env),{
+      service:async()=>{
+        const effective=await runtimeEnv(env,provided?.store);
+        return provided ? new Payments(effective,provided.store,provided.gateway,provided.now,provided.send) : service(effective);
+      },waitUntil:promise=>ctx.waitUntil(promise),
+    }));
     if(path.startsWith('/api/integration/')) {
       requireThat(env.INTEGRATION_LIMITER && env.ADMIN_SESSION_SECRET,503,'INTEGRATION_NOT_CONFIGURED','接入服务尚未完成配置');
       const limit=await env.INTEGRATION_LIMITER.limit({key:hmacSha256(env.ADMIN_SESSION_SECRET,'integration-ip:'+(request.headers.get('CF-Connecting-IP') || 'unknown'))});
@@ -67,7 +72,7 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
       return secure(await handleIntegration(request,env,provided?.store || storeFor(env)));
     }
     if (request.method==='GET' && path==='/payment/return') {
-      const id=url.searchParams.get('out_trade_no');requireThat(id && /^pay_[a-f0-9]{32}$/.test(id),400,'INVALID_ORDER','订单参数错误');
+      const id=url.searchParams.get('payment_order_id') || url.searchParams.get('out_trade_no');requireThat(id && /^pay_[a-f0-9]{32}$/.test(id),400,'INVALID_ORDER','订单参数错误');
       // A return query is untrusted. It grants no rights and cannot change payment status.
       return secure(Response.redirect(`${env.PAY_BASE_URL}/checkout/${id}`,303));
     }
@@ -142,7 +147,8 @@ export async function handle(request:Request,env:Env,ctx:ExecutionContext,provid
         requireThat(client.enabled!==false,403,'CLIENT_DISABLED','该平台已暂停新付款');
         const input=parseJson(await readBody(request)) as {channel?:string};
         requireThat(input && ['page','wap'].includes(input.channel || '') && env.ALIPAY_CHANNELS.split(',').includes(input.channel!),400,'CHANNEL_UNAVAILABLE','该支付方式尚未启用');
-        return secure(json({paymentUrl:payments.gateway.paymentUrl({id:order.id,subject:order.subject,totalAmount:order.amount,expiresAt},{channel:input.channel as 'page'|'wap',notifyUrl:`${env.PAY_BASE_URL}/api/alipay/notify`,pageReturnUrl:`${env.PAY_BASE_URL}/payment/return`})}));
+        const payable=await payments.preparePayment(id),attempt=payments.activeAttempt(payable);
+        return secure(json({paymentUrl:payments.gateway.paymentUrl({id:attempt.id,subject:payable.subject,totalAmount:payable.amount,expiresAt:attempt.expiresAt},{channel:input.channel as 'page'|'wap',notifyUrl:`${env.PAY_BASE_URL}/api/alipay/notify`,pageReturnUrl:`${env.PAY_BASE_URL}/payment/return?payment_order_id=${id}`})}));
       }
       if(action==='refresh' && order.status==='PAID')ctx.waitUntil(payments.deliver(`evt_${id}`,client).catch(()=>console.warn('webhook_delivery_failed')));
       return secure(json(payments.view(order,client)));

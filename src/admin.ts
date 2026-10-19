@@ -1,10 +1,18 @@
 import {adminLogin,adminLogout,adminSession,requireAdminMutation} from './admin-auth';
-import {HttpError,requireThat} from './config';
+import {clients,HttpError,requireThat} from './config';
 import {jsonBody} from './http';
 import {Registry,type ClientConfig} from './registry';
 import {makeIntegrationPrompt,skillMarkdown,skillZip} from './skill';
 import type {Env,Store} from './types';
 import {Reporting,type OrderStatus} from './reporting';
+import {Payments,type AdminOrderAction,type OrderActionInput} from './payments';
+import {createAlipay} from './alipay';
+import {hmacSha256} from './crypto';
+
+export interface AdminPaymentOptions {
+  service?:()=>Promise<Payments>;
+  waitUntil?:(promise:Promise<unknown>)=>void;
+}
 
 function reportQuery(url:URL,keys:string[]):Record<string,string> {
   const result:Record<string,string>={};
@@ -15,7 +23,7 @@ function reportQuery(url:URL,keys:string[]):Record<string,string> {
   return result;
 }
 
-export async function handleAdmin(request:Request,env:Env,store:Store):Promise<Response> {
+export async function handleAdmin(request:Request,env:Env,store:Store,paymentOptions:AdminPaymentOptions={}):Promise<Response> {
   const url=new URL(request.url);const {pathname,search}=url;
   const reportRead=request.method==='GET' && ['/api/admin/reports/summary','/api/admin/reports/orders'].includes(pathname);
   requireThat(!search || reportRead,400,'INVALID_REQUEST','此管理接口不接受查询参数');
@@ -29,6 +37,41 @@ export async function handleAdmin(request:Request,env:Env,store:Store):Promise<R
   if(pathname==='/api/admin/logout' && request.method==='POST')return adminLogout();
   if(pathname==='/api/admin/skill' && request.method==='GET')return Response.json({content:skillMarkdown()});
   if(pathname==='/api/admin/skill.zip' && request.method==='GET')return new Response(skillZip() as BodyInit,{headers:{'Content-Type':'application/zip','Content-Disposition':'attachment; filename="brclio-pay-integrate.zip"'}});
+  const orderAction=/^\/api\/admin\/orders\/(pay_[a-f0-9]{32})(?:\/(close|reopen|reconcile))?$/.exec(pathname);
+  if(orderAction) {
+    const [,id,action]=orderAction;
+    requireThat(request.method===(action?'POST':'GET'),405,'METHOD_NOT_ALLOWED','请求方法不支持');
+    let input:OrderActionInput|undefined;
+    if(action) {
+      const body=await jsonBody(request,4096);
+      requireThat(body && typeof body==='object' && !Array.isArray(body),400,'INVALID_REQUEST','订单操作参数无效');
+      const value=body as Record<string,unknown>;
+      requireThat(Object.keys(value).every(key=>['expectedVersion','requestId','reason'].includes(key))
+        && typeof value.expectedVersion==='string' && /^[a-f0-9]{64}$/.test(value.expectedVersion)
+        && typeof value.requestId==='string' && /^[A-Za-z0-9_-]{8,100}$/.test(value.requestId)
+        && typeof value.reason==='string' && value.reason.trim().length>0 && value.reason.trim().length<=500
+        && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value.reason),400,'INVALID_REQUEST','请填写操作原因并重新读取订单版本');
+      input={expectedVersion:value.expectedVersion,requestId:value.requestId,reason:value.reason.trim()};
+      if(env.PAYMENT_API_LIMITER) {
+        const limit=await env.PAYMENT_API_LIMITER.limit({key:hmacSha256(env.CHECKOUT_SECRET,'admin-order:'+identity.email)});
+        requireThat(limit.success,429,'PAYMENT_RATE_LIMIT','订单操作过于频繁，请稍后重试');
+      }
+    }
+    // Do not initialize a gateway or read the registry before authentication,
+    // CSRF, method and input validation have succeeded.
+    const payments=paymentOptions.service ? await paymentOptions.service() : new Payments(
+      {...env,CLIENTS_JSON:JSON.stringify(await new Registry(env,store).resolveClients())},store,createAlipay(env));
+    const original=await payments.order(id);
+    const client=clients(payments.env).find(item=>item.id===original.clientId);
+    const detail=action ? await payments.adminAction(id,action as AdminOrderAction,input!,identity.email,client) : await payments.adminDetail(id);
+    detail.actions.reopen=detail.actions.reopen && payments.env.PAYMENT_ENABLED==='true' && !!client && client.enabled!==false
+      && Object.hasOwn(client.skus,original.sku) && client.skus[original.sku].enabled!==false;
+    if(action && detail.order.status==='PAID' && client) {
+      const delivery=payments.deliver(`evt_${id}`,client).catch(()=>console.warn('webhook_delivery_failed'));
+      if(paymentOptions.waitUntil)paymentOptions.waitUntil(delivery);else await delivery;
+    }
+    return Response.json(detail);
+  }
   if(reportRead) {
     const reporting=new Reporting(store,env.PAYMENT_MODE);
     if(pathname==='/api/admin/reports/summary') {

@@ -19,6 +19,12 @@
     'orderFilters', 'ordersMonth', 'ordersClient', 'ordersStatus', 'searchOrdersButton', 'exportOrdersButton',
     'ordersMessage', 'ordersRows', 'ordersEmpty', 'previousOrdersButton', 'nextOrdersButton', 'ordersPageLabel',
     'orderDetails', 'orderDetailFields', 'closeOrderDetailsButton', 'productClient', 'productsEmpty',
+    'reloadOrderDetailsButton', 'orderDetailMessage', 'orderPaymentWarning', 'orderActionButtons', 'orderActionHint',
+    'closePaymentOrderButton', 'reopenPaymentOrderButton', 'reconcilePaymentOrderButton',
+    'orderActionForm', 'orderActionTitle', 'orderActionDescription', 'orderActionReason', 'orderActionAcknowledged',
+    'orderActionConfirmationHint', 'confirmOrderActionButton', 'cancelOrderActionButton',
+    'orderCheckoutPanel', 'orderCheckoutUrl', 'copyOrderCheckoutButton', 'orderCheckoutMessage',
+    'orderAttemptsSection', 'orderAttemptsList', 'orderAuditList', 'orderAuditEmpty',
     'productAiButton', 'productEditorHost', 'platformEditorHost', 'grantDomainMode', 'grantPricingMode',
     'grantOriginsLabel', 'grantOriginsHint', 'grantPricingHint', 'reloadAuditButton', 'auditMessage', 'auditEmpty', 'auditList',
   ];
@@ -45,6 +51,10 @@
   let orderCursors = [null];
   let orderPageIndex = 0;
   let loadedOrderFilters = null;
+  let selectedOrderId = null;
+  let selectedOrderDetail = null;
+  let pendingOrderAction = null;
+  let orderCheckoutTimer = null;
   const pageTitles = {
     overview: ['经营概览', '从已确认付款，了解每个产品的成交。'], orders: ['订单记录', '核对支付与产品通知，查看每一笔订单。'],
     products: ['商品与价格', '调整价格、销售状态和权益说明。'], ai: ['AI 接入', '复制完整任务，让 AI 对接产品与支付中心。'],
@@ -85,6 +95,15 @@
     ui.nextOrdersButton.disabled = busy || !orderNextCursor;
     ui.productAiButton.disabled = busy || !clients.some((client) => client.id === ui.productClient.value);
     ui.rebuildButton.disabled = busy || !currentCoverage || currentCoverage.complete;
+    for (const [action, button] of [['close', ui.closePaymentOrderButton], ['reopen', ui.reopenPaymentOrderButton], ['reconcile', ui.reconcilePaymentOrderButton]]) {
+      button.disabled = busy || !!pendingOrderAction || !selectedOrderDetail?.actions[action];
+    }
+    ui.reloadOrderDetailsButton.disabled = busy || !selectedOrderId || !!pendingOrderAction?.submission;
+    ui.orderActionForm.setAttribute('aria-busy', String(busy));
+    ui.orderActionReason.readOnly = !!pendingOrderAction?.submission;
+    ui.orderActionAcknowledged.disabled = busy || !!pendingOrderAction?.submission;
+    ui.copyOrderCheckoutButton.disabled = busy || !ui.orderCheckoutUrl.value;
+    if (!busy && pendingOrderAction?.submission) ui.confirmOrderActionButton.textContent = '重试并核对结果';
   }
   async function operation(button, progressText, action) {
     if (busy) return;
@@ -150,7 +169,7 @@
     summaryLoaded = false; ordersLoaded = false; auditLoaded = false; currentCoverage = null; rebuildCursor = null;
     orderItems = []; orderNextCursor = null; orderCursors = [null]; orderPageIndex = 0; loadedOrderFilters = null;
     ui.auditList.replaceChildren(); ui.auditEmpty.hidden = false; message(ui.auditMessage, '');
-    ui.ordersRows.replaceChildren(); ui.orderDetailFields.replaceChildren(); ui.orderDetails.hidden = true;
+    ui.ordersRows.replaceChildren(); clearOrderDetails();
     ui.revenueChart.replaceChildren(); ui.coverageNotice.hidden = true;
     renderClientSelectors();
     for (const id of ['metricRevenue', 'metricPaid', 'metricPending', 'metricClosed', 'metricDelivery', 'metricAllTime']) ui[id].textContent = '—';
@@ -542,6 +561,7 @@
 
   function activatePage(name, updateHash = true) {
     activePage = Object.hasOwn(pageTitles, name) ? name : 'overview';
+    if (activePage !== 'orders') clearOrderCheckout();
     document.querySelectorAll('[data-admin-page]').forEach((page) => { page.hidden = page.dataset.adminPage !== activePage; });
     document.querySelectorAll('[data-page-link]').forEach((link) => {
       if (link.dataset.pageLink === activePage) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
@@ -662,7 +682,7 @@
       ui.metricRevenue.textContent = money(result.paidAmountCents);
       ui.metricPaid.textContent = count(result.paidCount); ui.metricPending.textContent = count(result.pendingCount);
       ui.metricClosed.textContent = count(result.closedCount); ui.metricDelivery.textContent = count(result.deliveryPendingCount);
-      ui.metricAllTime.textContent = money(result.allTime.paidAmountCents); ui.metricAllTimeCount.textContent = `${count(result.allTime.paidCount)} 笔 · 当前平台筛选范围`;
+      ui.metricAllTime.textContent = money(result.allTime.paidAmountCents); ui.metricAllTimeCount.textContent = `${count(result.allTime.paidCount)} 笔付款 · 当前平台筛选范围`;
       ui.reportMode.textContent = result.mode === 'live' ? '正式账本 / CNY' : '沙箱账本 / CNY';
       setCoverage(result.coverage); renderTrend(result.daily, result.coverage.complete); summaryLoaded = true; message(ui.summaryMessage, '');
     } catch (error) { report(error, ui.summaryMessage); }
@@ -673,13 +693,155 @@
     return Number.isFinite(date.getTime()) ? `${date.getFullYear() > 0 ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date) : '—'}` : '—';
   }
   function statusLabel(status) { return { PAID: '已付款', PENDING: '待付款', CLOSED: '已关闭' }[status] || '未知状态'; }
-  function openOrderDetails(order) {
+  function clearOrderCheckout() {
+    if (orderCheckoutTimer !== null) window.clearTimeout(orderCheckoutTimer);
+    orderCheckoutTimer = null; ui.orderCheckoutUrl.value = ''; ui.orderCheckoutMessage.textContent = ''; ui.orderCheckoutPanel.hidden = true;
+  }
+  function clearOrderDetails() {
+    selectedOrderId = null; selectedOrderDetail = null; pendingOrderAction = null;
+    clearOrderCheckout(); ui.orderActionForm.reset(); ui.orderActionForm.hidden = true;
+    ui.orderDetailFields.replaceChildren(); ui.orderAttemptsList.replaceChildren(); ui.orderAuditList.replaceChildren();
+    ui.orderAuditEmpty.hidden = false; ui.orderDetails.hidden = true; ui.orderActionButtons.hidden = true; ui.orderActionHint.hidden = true;
+    message(ui.orderDetailMessage, ''); message(ui.orderPaymentWarning, '');
+  }
+  function orderAmount(order) {
+    if (Number.isSafeInteger(order.amountCents)) return money(order.amountCents);
+    if (typeof order.amount === 'string' && /^\d+\.\d{2}$/.test(order.amount)) return money(Number(order.amount.replace('.', '')));
+    throw new ApiError(502, 'INVALID_ORDER', '订单金额暂时无法读取，请刷新后重试。');
+  }
+  function readOrderDetail(result, id) {
+    if (!result?.order || result.order.id !== id || typeof result.version !== 'string' || !result.version
+      || !['PENDING', 'PAID', 'CLOSED'].includes(result.order.status)
+      || !result.actions || ['close', 'reopen', 'reconcile'].some((action) => typeof result.actions[action] !== 'boolean')
+      || !Array.isArray(result.audit)) throw new ApiError(502, 'INVALID_ORDER', '订单详情不完整，请刷新状态后重试。');
+    orderAmount(result.order);
+    return { order: result.order, version: result.version, actions: result.actions, audit: result.audit.slice(0, 20) };
+  }
+  function renderOrderDetail() {
+    const detail = selectedOrderDetail;
+    if (!detail) return;
+    const order = detail.order;
     const fields = [['支付订单号', order.id], ['产品订单号', order.productOrderId], ['平台', order.clientId], ['商品代码', order.sku], ['商品', order.subject],
-      ['订单金额', money(order.amountCents)], ['订单状态', statusLabel(order.status)], ['产品通知', order.status !== 'PAID' ? '尚未付款' : order.fulfillmentStatus === 'delivered' ? '已送达' : '待送达'],
-      ['创建时间', orderTime(order.createdAt)], ['到期时间', orderTime(order.expiresAt)], ['付款时间', orderTime(order.paidAt)], ['支付宝交易号', order.tradeNo || '—'], ['账本', order.mode === 'live' ? '正式' : '沙箱']];
-    ui.orderDetailFields.replaceChildren(...fields.map(([label, value]) => { const row = element('div', ''); row.append(element('dt', '', label), element('dd', '', value)); return row; }));
-    ui.orderDetails.hidden = false;
-    ui.orderDetails.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
+      ['订单金额', orderAmount(order)], ['订单状态', statusLabel(order.status)], ['产品通知', order.status !== 'PAID' ? '尚未付款' : order.fulfillmentStatus === 'delivered' ? '已送达' : '待送达'],
+      ['创建时间', orderTime(order.createdAt)], ['付款截止', orderTime(order.expiresAt)], ['付款时间', orderTime(order.paidAt)], ['支付宝交易号', order.tradeNo || '—'], ['账本', order.mode === 'live' ? '正式' : '沙箱']];
+    if (order.originalExpiresAt && order.originalExpiresAt !== order.expiresAt) fields.splice(10, 0, ['原付款截止', orderTime(order.originalExpiresAt)]);
+    ui.orderDetailFields.replaceChildren(...fields.map(([label, value]) => { const row = element('div', ''); row.append(element('dt', '', label), element('dd', '', value || '—')); return row; }));
+    const available = Object.values(detail.actions).some(Boolean);
+    ui.orderActionButtons.hidden = !available; ui.orderActionHint.hidden = !available;
+    ui.closePaymentOrderButton.hidden = !detail.actions.close; ui.reopenPaymentOrderButton.hidden = !detail.actions.reopen;
+    ui.reconcilePaymentOrderButton.hidden = !detail.actions.reconcile;
+    const warnings = [];
+    if (order.operation && !order.operation.expired) warnings.push(`这笔订单正在处理，请稍后点击“刷新状态”查看结果。处理窗口截止 ${orderTime(order.operation.expiresAt)}。`);
+    if (order.operation?.expired) warnings.push('上一次订单操作未能完成，请先核实付款结果后再继续操作。');
+    if (order.mayStillPayUntil && Date.parse(order.mayStillPayUntil) > Date.now()) warnings.push(`此前已发出的支付宝付款页仍可能在 ${orderTime(order.mayStillPayUntil)} 前完成付款，请先核实付款结果，再决定后续操作。`);
+    if (order.cleanupPending) warnings.push('这笔订单已确认付款，仍有其他付款记录待关闭。请点击“核实付款并补记”核实并关闭剩余未付款记录，避免重复付款。系统不会重复开通权益。');
+    if (Array.isArray(order.duplicatePayments) && order.duplicatePayments.length) {
+      warnings.push(`发现 ${order.duplicatePayments.length} 笔额外到账记录，系统不会重复开通权益。请人工核对到账并处理退款。`);
+      for (const payment of order.duplicatePayments) warnings.push(`交易号 ${payment.tradeNo || '—'} · 金额 ${orderAmount(payment)} · 付款 ${orderTime(payment.paidAt)}`);
+    }
+    message(ui.orderPaymentWarning, warnings.join('\n'), 'error');
+    const attempts = Array.isArray(order.paymentAttempts) ? order.paymentAttempts : [];
+    ui.orderAttemptsSection.hidden = attempts.length === 0;
+    ui.orderAttemptsList.replaceChildren(...attempts.map((attempt, index) => {
+      const row = element('article', 'order-attempt-row'), heading = element('div', 'audit-row-heading');
+      heading.append(element('strong', '', `第 ${index + 1} 次付款`), element('span', 'admin-badge', statusLabel(attempt.status)));
+      if (attempt.id === order.activeAttempt?.id) heading.append(element('span', 'field-hint', '当前记录'));
+      row.append(heading, element('p', 'order-history-meta', `付款截止 ${orderTime(attempt.expiresAt)}${attempt.paidAt ? ` · 付款 ${orderTime(attempt.paidAt)}` : ''}`));
+      row.append(element('p', 'order-history-meta', attempt.id)); return row;
+    }));
+    const actionLabels = { close: '提前关闭', reopen: '重新启用', reconcile: '核实付款并补记' };
+    const resultLabels = { running: '处理中', completed: '已完成', failed: '未完成' };
+    ui.orderAuditList.replaceChildren(...detail.audit.map((entry) => {
+      const row = element('article', 'audit-row'), heading = element('div', 'audit-row-heading');
+      heading.append(element('strong', '', actionLabels[entry.action] || '订单操作'), element('span', 'admin-badge', resultLabels[entry.status] || '已记录'), element('time', '', orderTime(entry.completedAt || entry.startedAt)));
+      row.append(heading, element('p', 'order-history-meta', `${entry.actor || '管理员'} · ${statusLabel(entry.beforeStatus)}${entry.afterStatus ? ` → ${statusLabel(entry.afterStatus)}` : ''}`), element('p', 'order-audit-reason', entry.reason || '—'));
+      if (entry.message) row.append(element('p', 'order-history-meta', entry.message));
+      return row;
+    }));
+    ui.orderAuditEmpty.hidden = detail.audit.length !== 0;
+    ui.orderDetails.hidden = false; syncControls();
+  }
+  async function loadOrderDetails(id, scroll = false) {
+    clearOrderDetails(); selectedOrderId = id; ui.orderDetails.hidden = false;
+    message(ui.orderDetailMessage, '正在核对最新订单状态…');
+    if (scroll) ui.orderDetails.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+    try {
+      selectedOrderDetail = readOrderDetail(await request(`/orders/${encodeURIComponent(id)}`), id);
+      renderOrderDetail(); message(ui.orderDetailMessage, '');
+    } catch (error) { report(error, ui.orderDetailMessage); }
+  }
+  function beginOrderAction(action) {
+    if (busy || !selectedOrderDetail?.actions[action] || pendingOrderAction) return;
+    clearOrderCheckout(); pendingOrderAction = { action, submission: null };
+    const order = selectedOrderDetail.order;
+    const copy = {
+      close: ['提前关闭这笔订单', '将先核实当前付款结果，再停止这笔订单继续付款。若支付宝已确认成功，会按实际付款入账。', '已发出的支付宝付款页可能仍需等待原付款期限结束。', '确认关闭'],
+      reopen: ['重新启用这笔订单', '为原产品订单开启新的 10 分钟付款期限，保留原金额、商品和全部历史记录。', '生成新链接后，请重新发送给这位用户。', '确认重新启用'],
+      reconcile: ['核实付款并补记', '向支付宝查询这笔订单的实际付款结果。只有确认付款成功，才补记账本并发送产品通知。', '无法通过人工勾选将未付款订单改为已付款。', '确认核实付款'],
+    }[action];
+    ui.orderActionTitle.textContent = `${copy[0]} · ${orderAmount(order)}`;
+    ui.orderActionDescription.textContent = `${copy[1]} 产品订单号：${order.productOrderId}。`;
+    ui.orderActionConfirmationHint.textContent = copy[2]; ui.confirmOrderActionButton.textContent = copy[3];
+    ui.cancelOrderActionButton.textContent = '取消'; ui.orderActionForm.reset(); ui.orderActionForm.hidden = false;
+    message(ui.orderDetailMessage, ''); syncControls(); ui.orderActionReason.focus();
+  }
+  function showOrderCheckout(url, order) {
+    clearOrderCheckout();
+    if (typeof url !== 'string') return;
+    let parsed;
+    try { parsed = new URL(url); } catch { /* A malformed link must never enter the clipboard. */ }
+    const remaining = Date.parse(order.expiresAt) - Date.now();
+    if (!parsed || parsed.protocol !== 'https:' || parsed.pathname !== `/checkout/${order.id}` || parsed.hash.length < 2 || !Number.isFinite(remaining) || remaining <= 0) {
+      message(ui.orderDetailMessage, '订单状态已更新，但付款链接暂时无法使用，请刷新状态后核对。', 'error'); return;
+    }
+    ui.orderCheckoutUrl.value = parsed.href; ui.orderCheckoutPanel.hidden = false;
+    ui.orderCheckoutMessage.textContent = `付款截止 ${orderTime(order.expiresAt)} · 请及时复制并重新发送给用户。`;
+    orderCheckoutTimer = window.setTimeout(() => { clearOrderCheckout(); message(ui.orderDetailMessage, '本次付款期限已结束，请刷新订单状态。'); syncControls(); }, remaining);
+  }
+  async function submitOrderAction() {
+    if (!pendingOrderAction || !selectedOrderDetail || (!pendingOrderAction.submission && !ui.orderActionAcknowledged.checked)) return;
+    if (!pendingOrderAction.submission) {
+      const reason = ui.orderActionReason.value.trim();
+      if (!reason || reason.length > 500 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(reason)) { ui.orderActionReason.focus(); message(ui.orderDetailMessage, '请填写 1 至 500 字的操作原因。', 'error'); return; }
+      pendingOrderAction.submission = { expectedVersion: selectedOrderDetail.version, requestId: crypto.randomUUID(), reason };
+    }
+    const action = pendingOrderAction.action, id = selectedOrderId, submission = pendingOrderAction.submission;
+    ui.cancelOrderActionButton.textContent = '停止重试'; syncControls();
+    message(ui.orderDetailMessage, '正在核实并处理这笔订单，请稍候…');
+    try {
+      const result = await request(`/orders/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: submission });
+      const detail = readOrderDetail(result, id);
+      selectedOrderDetail = detail; pendingOrderAction = null; ui.orderActionForm.reset(); ui.orderActionForm.hidden = true;
+      const index = orderItems.findIndex((order) => order.id === id);
+      if (index >= 0) orderItems[index] = { ...orderItems[index], ...detail.order };
+      summaryLoaded = false; ordersLoaded = false; renderOrders(); renderOrderDetail();
+      message(ui.orderDetailMessage, result.message || { close: '已核实并处理关闭请求。', reopen: '已重新启用，请复制新链接并重新发送给用户。', reconcile: '付款核实已完成，当前结果见订单状态。' }[action], 'success');
+      if (action === 'reopen' && result.checkoutUrl) showOrderCheckout(result.checkoutUrl, detail.order);
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && ![401, 429].includes(error.status)) {
+        pendingOrderAction = null; ui.orderActionForm.hidden = true;
+        selectedOrderDetail.actions = { close: false, reopen: false, reconcile: false }; renderOrderDetail();
+        message(ui.orderDetailMessage, {
+          ORDER_VERSION_CONFLICT: '订单已被其他操作或付款通知更新。请点击“刷新状态”核对后重新操作。',
+          ORDER_ALREADY_PAID: '这笔订单已有确认付款记录。请刷新状态查看最新结果。',
+          ORDER_NOT_REOPENABLE: '这笔订单当前不能重新启用。请刷新状态查看最新结果。',
+          PREVIOUS_PAYMENT_WINDOW_OPEN: '此前的支付宝付款页仍可能完成付款。请等待原付款期限结束，再刷新状态并核实付款。',
+          ORDER_REOPEN_UNSAFE: '此前的支付宝付款页仍可能完成付款。请等待原付款期限结束，再刷新状态并核实付款。',
+          ORDER_ACTION_NOT_ALLOWED: '这笔订单当前不允许此操作。请刷新状态查看最新结果。',
+          ORDER_ACTION_FAILED: '上一次操作未完成。请刷新状态核对结果，再重新填写原因并确认。',
+          ORDER_OPERATION_IN_PROGRESS: '这笔订单正在处理。请稍后点击“刷新状态”核对结果，避免重复操作。',
+          ORDER_ATTEMPT_LIMIT: '这笔订单已达到重新启用次数上限。请让产品创建新的业务订单。',
+          CLIENT_DISABLED: '这笔订单所属平台已停用，当前无法重新启用。请核对平台配置后刷新状态。',
+          SKU_DISABLED: '这笔订单的商品已停售，当前无法重新启用。请核对商品配置后刷新状态。',
+        }[error.code] || '本次操作未能完成。请刷新订单状态，核对结果后重新操作。', 'error');
+      } else {
+        report(error, ui.orderDetailMessage);
+        if (session && pendingOrderAction) {
+          ui.orderDetailMessage.textContent += ' 本次结果可能尚未确定；请保留当前页面，使用同一次请求重试，避免重复处理。';
+          ui.confirmOrderActionButton.textContent = '重试并核对结果';
+        }
+      }
+    }
   }
   function renderOrders() {
     ui.ordersRows.replaceChildren(...orderItems.map((order) => {
@@ -689,7 +851,7 @@
       const amount = element('td', 'order-amount', money(order.amountCents));
       const status = element('td', ''); status.append(element('span', `admin-badge ${order.status === 'PAID' ? 'paid-status' : ''}`, statusLabel(order.status)), element('small', '', order.status !== 'PAID' ? '尚未付款' : order.fulfillmentStatus === 'delivered' ? '通知已送达' : '通知待送达'));
       const dates = element('td', 'order-dates'); dates.append(element('span', '', `创建 ${orderTime(order.createdAt)}`), element('small', '', order.paidAt ? `付款 ${orderTime(order.paidAt)}` : '北京时间'));
-      const detail = element('td', ''); const button = element('button', 'admin-text-button', '查看'); button.type = 'button'; button.addEventListener('click', () => openOrderDetails(order)); detail.append(button);
+      const detail = element('td', ''); const button = element('button', 'admin-text-button', '查看'); button.type = 'button'; button.setAttribute('data-busy-lock', ''); button.addEventListener('click', () => { void operation(button, '正在读取…', () => loadOrderDetails(order.id, true)); }); detail.append(button);
       row.append(identity, platform, amount, status, dates, detail); return row;
     }));
     ui.ordersEmpty.hidden = orderItems.length !== 0;
@@ -702,16 +864,16 @@
     try {
       if (reset) {
         loadedOrderFilters = { month: validMonth(ui.ordersMonth.value, true), clientId: ui.ordersClient.value, status: ui.ordersStatus.value };
-        orderCursors = [null]; targetPage = 0; orderPageIndex = 0; orderItems = []; orderNextCursor = null; renderOrders(); ui.orderDetails.hidden = true;
+        orderCursors = [null]; targetPage = 0; orderPageIndex = 0; orderItems = []; orderNextCursor = null; renderOrders(); clearOrderDetails();
       }
       const query = new URLSearchParams({ limit: '20' });
       for (const [key, value] of Object.entries(loadedOrderFilters || {})) if (value) query.set(key, value);
       if (orderCursors[targetPage]) query.set('cursor', orderCursors[targetPage]);
       const result = await request(`/reports/orders?${query}`);
       if (!Array.isArray(result.items) || result.items.length > 25 || !(result.nextCursor === null || typeof result.nextCursor === 'string')) throw new ApiError(502, 'INVALID_REPORT', '订单列表暂时无法读取。');
-      for (const order of result.items) { money(order.amountCents); if (!['PENDING', 'PAID', 'CLOSED'].includes(order.status)) throw new ApiError(502, 'INVALID_REPORT', '订单状态暂时无法读取。'); }
+      for (const order of result.items) { money(order.amountCents); extraPaymentTotal(order); if (!['PENDING', 'PAID', 'CLOSED'].includes(order.status)) throw new ApiError(502, 'INVALID_REPORT', '订单状态暂时无法读取。'); }
       orderItems = result.items; orderNextCursor = result.nextCursor; orderPageIndex = targetPage; ordersLoaded = true;
-      setCoverage(result.coverage); renderOrders(); ui.orderDetails.hidden = true; message(ui.ordersMessage, '');
+      setCoverage(result.coverage); renderOrders(); clearOrderDetails(); message(ui.ordersMessage, '');
     } catch (error) { report(error, ui.ordersMessage); }
   }
   function csvCell(value) {
@@ -719,10 +881,19 @@
     if (/^[\s]*[=+\-@\t\r]/.test(text)) text = `'${text}`;
     return `"${text.replaceAll('"', '""')}"`;
   }
+  function extraPaymentTotal(order) {
+    const payments = Array.isArray(order.duplicatePayments) ? order.duplicatePayments : [];
+    const amountCents = payments.reduce((total, payment) => {
+      orderAmount(payment);
+      return total + (Number.isSafeInteger(payment.amountCents) ? payment.amountCents : Number(payment.amount.replace('.', '')));
+    }, 0);
+    money(amountCents);
+    return { count: payments.length, amount: `${Math.floor(amountCents / 100)}.${String(amountCents % 100).padStart(2, '0')}` };
+  }
   function exportCurrentOrders() {
     if (!orderItems.length) return;
-    const rows = [['支付订单号', '产品订单号', '平台', '商品代码', '商品', '金额（元）', '状态', '产品通知', '创建时间（北京时间）', '付款时间（北京时间）', '支付宝交易号', '账本'],
-      ...orderItems.map((order) => [order.id, order.productOrderId, order.clientId, order.sku, order.subject, order.amount, statusLabel(order.status), order.fulfillmentStatus, orderTime(order.createdAt), orderTime(order.paidAt), order.tradeNo || '', order.mode])];
+    const rows = [['支付订单号', '产品订单号', '平台', '商品代码', '商品', '金额（元）', '额外实付笔数', '额外实付金额（元）', '状态', '产品通知', '创建时间（北京时间）', '付款时间（北京时间）', '支付宝交易号', '账本'],
+      ...orderItems.map((order) => { const extra = extraPaymentTotal(order); return [order.id, order.productOrderId, order.clientId, order.sku, order.subject, order.amount, extra.count, extra.amount, statusLabel(order.status), order.fulfillmentStatus, orderTime(order.createdAt), orderTime(order.paidAt), order.tradeNo || '', order.mode]; })];
     const blob = new Blob(['\uFEFF' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob), link = element('a', ''); link.href = url; link.download = `brclio-pay-orders-current-page-${orderPageIndex + 1}.csv`;
     document.body.append(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -819,7 +990,7 @@
   ui.grantDomainMode.addEventListener('change', syncGrantModes); ui.grantPricingMode.addEventListener('change', syncGrantModes);
   ui.summaryFilters.addEventListener('change', () => { clearSummaryView(); message(ui.summaryMessage, '筛选条件已更改，点击“查看统计”读取对应数据。'); });
   ui.orderFilters.addEventListener('change', () => {
-    ordersLoaded = false; orderItems = []; orderNextCursor = null; orderCursors = [null]; orderPageIndex = 0; renderOrders(); ui.orderDetails.hidden = true;
+    ordersLoaded = false; orderItems = []; orderNextCursor = null; orderCursors = [null]; orderPageIndex = 0; renderOrders(); clearOrderDetails();
     ui.ordersEmpty.textContent = '筛选条件已更改，点击“查询订单”读取对应记录。'; message(ui.ordersMessage, '筛选条件已更改，之前的订单页已清除。');
   });
   ui.summaryFilters.addEventListener('submit', (event) => { event.preventDefault(); if (ui.summaryFilters.reportValidity()) void operation(ui.refreshSummaryButton, '正在读取…', loadSummary); });
@@ -827,7 +998,33 @@
   ui.nextOrdersButton.addEventListener('click', () => { if (!orderNextCursor) return; orderCursors[orderPageIndex + 1] = orderNextCursor; void operation(ui.nextOrdersButton, '正在读取…', () => loadOrders(false, orderPageIndex + 1)); });
   ui.previousOrdersButton.addEventListener('click', () => { if (orderPageIndex > 0) void operation(ui.previousOrdersButton, '正在读取…', () => loadOrders(false, orderPageIndex - 1)); });
   ui.exportOrdersButton.addEventListener('click', exportCurrentOrders);
-  ui.closeOrderDetailsButton.addEventListener('click', () => { ui.orderDetails.hidden = true; });
+  ui.closeOrderDetailsButton.addEventListener('click', () => { clearOrderDetails(); syncControls(); });
+  ui.reloadOrderDetailsButton.addEventListener('click', () => { const id = selectedOrderId; if (id) void operation(ui.reloadOrderDetailsButton, '正在刷新…', () => loadOrderDetails(id)); });
+  ui.closePaymentOrderButton.addEventListener('click', () => beginOrderAction('close'));
+  ui.reopenPaymentOrderButton.addEventListener('click', () => beginOrderAction('reopen'));
+  ui.reconcilePaymentOrderButton.addEventListener('click', () => beginOrderAction('reconcile'));
+  ui.orderActionForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!pendingOrderAction?.submission && !ui.orderActionForm.reportValidity()) return;
+    void operation(ui.confirmOrderActionButton, '正在处理…', submitOrderAction);
+  });
+  ui.cancelOrderActionButton.addEventListener('click', () => {
+    const sent = !!pendingOrderAction?.submission;
+    pendingOrderAction = null; ui.orderActionForm.reset(); ui.orderActionForm.hidden = true;
+    if (sent && selectedOrderDetail) {
+      selectedOrderDetail.actions = { close: false, reopen: false, reconcile: false }; renderOrderDetail();
+      message(ui.orderDetailMessage, '已停止重试。服务器上的操作不会因此撤销，请刷新状态核对处理结果。');
+    }
+    syncControls();
+  });
+  ui.copyOrderCheckoutButton.addEventListener('click', () => {
+    if (!ui.orderCheckoutUrl.value) return;
+    void operation(ui.copyOrderCheckoutButton, '正在复制…', async () => {
+      try { await navigator.clipboard.writeText(ui.orderCheckoutUrl.value); ui.orderCheckoutMessage.textContent = '新链接已复制，请重新发送给这位用户；10 分钟付款期限不会因复制而延长。'; }
+      catch { ui.orderCheckoutUrl.focus(); ui.orderCheckoutUrl.select(); ui.orderCheckoutMessage.textContent = '自动复制未完成，请手动复制上方完整链接并重新发送给用户。'; }
+    });
+  });
+  window.addEventListener('pagehide', clearOrderCheckout);
   ui.rebuildButton.addEventListener('click', () => {
     void operation(ui.rebuildButton, '正在补建本批…', async () => {
       try {
@@ -862,7 +1059,7 @@
   });
   window.addEventListener('pageshow', (event) => {
     if (!event.persisted) return;
-    clearOutput();
+    clearOutput(); clearOrderDetails();
     void operation(null, null, async () => {
       try { showDashboard(await request('/session')); await loadClients(); }
       catch (error) { showLogin('请重新确认登录状态。'); if (!(error instanceof ApiError && error.status === 401)) report(error, ui.loginMessage); }

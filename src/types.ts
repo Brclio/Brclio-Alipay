@@ -58,6 +58,29 @@ export interface Order {
   paidAt?: string;
   lastCheckedAt?: string;
   fulfillmentStatus: 'pending' | 'delivered';
+  /** The purchase identity and original price/deadline stay immutable. A reopened
+   * purchase uses a fresh Alipay out_trade_no and a separate ten-minute window. */
+  activeAttemptId?: string;
+  /** Marks orders whose signed checkout links have always been reserved. */
+  attemptTrackingVersion?: 1;
+  paymentAttempts?: PaymentAttempt[];
+  adminOperation?: {requestId:string;token:string;action:'close'|'reopen'|'reconcile';expiresAt:string};
+  recentActionIds?: string[];
+  duplicatePayments?: {attemptId:string;tradeNo:string;paidAt:string;amount:string}[];
+}
+export interface PaymentAttempt {
+  id:string;
+  createdAt:string;
+  expiresAt:string;
+  status:Order['status'];
+  linkIssuedAt?:string;
+  /** Historical signed URLs may have a later deadline than today's policy. */
+  linkExpiresAt?:string;
+  closedAt?:string;
+  /** A null query cannot invalidate a previously issued, uncreated payment URL. */
+  closeConfirmed?:boolean;
+  tradeNo?:string;
+  paidAt?:string;
 }
 export interface PaymentEvent {
   id: string;

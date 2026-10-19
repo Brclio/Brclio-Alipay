@@ -622,16 +622,18 @@ describe('worker trust boundaries', () => {
       expect(await allowed.json()).toEqual({paymentUrl:'https://openapi.alipay.com/gateway.do'});
       expect(paymentUrl).toHaveBeenCalledExactlyOnceWith(
         {id,subject:original.subject,totalAmount:original.amount,expiresAt:new Date(START+10*60_000).toISOString()},
-        {channel:'page',notifyUrl:`${f.env.PAY_BASE_URL}/api/alipay/notify`,pageReturnUrl:`${f.env.PAY_BASE_URL}/payment/return`},
+        {channel:'page',notifyUrl:`${f.env.PAY_BASE_URL}/api/alipay/notify`,pageReturnUrl:`${f.env.PAY_BASE_URL}/payment/return?payment_order_id=${id}`},
       );
+      const reserved=await f.payments.order(id),commits=f.store.commits.length;
+      expect(reserved).toMatchObject({id,amount:original.amount,createdAt:original.createdAt,expiresAt:original.expiresAt});
       clock.mockReturnValue(START+10*60_000);f.setNow(START+10*60_000);
       const expired=await handle(request(),f.env,ctx,f.payments);
       expect(expired.status).toBe(409);
       expect(await expired.json()).toMatchObject({error:{code:'ORDER_NOT_PAYABLE'}});
       expect(paymentUrl).toHaveBeenCalledTimes(1);
       expect(f.query).not.toHaveBeenCalled();expect(f.close).not.toHaveBeenCalled();
-      expect(await f.payments.order(id)).toEqual(original);
-      expect(f.store.commits).toHaveLength(1);
+      expect(await f.payments.order(id)).toEqual(reserved);
+      expect(f.store.commits).toHaveLength(commits);
       expect(ctx.waitUntil).not.toHaveBeenCalled();
     } finally {clock.mockRestore();}
   });

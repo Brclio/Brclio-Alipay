@@ -14,7 +14,8 @@
  * account state. Call dispose() BEFORE logout/account switch or replacing this order.
  * This wait timeout is separate from the center's 10-minute payment deadline.
  * CLOSED ends this wait; keep the old order for late valid paid events/manual checks.
- * A deliberate repurchase must use a new business order ID, never reopen this one.
+ * A normal repurchase uses a new business order ID. Administrator-only reopening
+ * preserves this logical ID; reopen checkout or start() to resume manual waiting.
  */
 export function createPaymentCompletionWatcher({
   productOrderId,

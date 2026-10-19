@@ -9,6 +9,7 @@ export interface ReportingOrder {
   id:string; mode:PaymentMode; clientId:string; productOrderId:string; sku:string; subject:string;
   amount:string; amountCents:number; status:OrderStatus; createdAt:string; expiresAt:string;
   paidAt?:string; tradeNo?:string; fulfillmentStatus:Order['fulfillmentStatus'];
+  duplicatePayments?:Order['duplicatePayments'];
 }
 export interface Coverage {
   scope:'ledger'; complete:boolean; sourceOrders:number; indexedOrders:number; missingOrders:number; checkedAt:string;
@@ -46,9 +47,17 @@ function orderView(order:Omit<Order,'requestHash'|'returnUrl'>):ReportingOrder {
   time(order.createdAt);time(order.expiresAt);
   integrity(typeof order.productOrderId==='string'&&typeof order.sku==='string'&&typeof order.subject==='string');
   if(order.status==='PAID'){integrity(typeof order.paidAt==='string'&&typeof order.tradeNo==='string');time(order.paidAt!);}
+  const duplicates=order.duplicatePayments??[];
+  integrity(Array.isArray(duplicates)&&duplicates.length<=19&&(!duplicates.length||order.status==='PAID'));
+  const tradeNos=new Set([order.tradeNo]);
+  for(const payment of duplicates){
+    integrity(payment&&/^pay_[a-f0-9]{32}$/.test(payment.attemptId)&&/^\d{10,64}$/.test(payment.tradeNo)&&!tradeNos.has(payment.tradeNo)&&payment.amount===order.amount);
+    time(payment.paidAt);cents(payment.amount);tradeNos.add(payment.tradeNo);
+  }
   return {id:order.id,mode:order.mode,clientId:order.clientId,productOrderId:order.productOrderId,sku:order.sku,subject:order.subject,
     amount:order.amount,amountCents:cents(order.amount),status:order.status,createdAt:order.createdAt,expiresAt:order.expiresAt,
-    ...(order.paidAt?{paidAt:order.paidAt}:{}),...(order.tradeNo?{tradeNo:order.tradeNo}:{}),fulfillmentStatus:order.fulfillmentStatus};
+    ...(order.paidAt?{paidAt:order.paidAt}:{}),...(order.tradeNo?{tradeNo:order.tradeNo}:{}),fulfillmentStatus:order.fulfillmentStatus,
+    ...(duplicates.length?{duplicatePayments:duplicates.map(({attemptId,tradeNo,paidAt,amount})=>({attemptId,tradeNo,paidAt,amount}))}:{})};
 }
 function indexPath(order:Pick<ReportingOrder,'id'|'mode'|'createdAt'>):string {
   const month=shanghaiDay(order.createdAt).slice(0,7);
@@ -79,7 +88,20 @@ function contributions(order:ReportingOrder|null):Map<string,MonthBucket> {
     bucket.paidCount=1;bucket.paidAmountCents=order.amountCents;bucket.deliveryPendingCount=order.fulfillmentStatus==='delivered'?0:1;
     bucket.daily[date]={paidCount:1,paidAmountCents:order.amountCents};
   }
-  result.set(month,bucket);return result;
+  result.set(month,bucket);
+  // A second distinct, verified Alipay payment is actual received money even
+  // though the business order and product entitlement remain single. Include
+  // it once on its own Shanghai payment date without changing the order price.
+  for(const payment of order.duplicatePayments??[]){
+    const day=shanghaiDay(payment.paidAt),paymentMonth=day.slice(0,7),additional=result.get(paymentMonth)??monthBucket(order.mode,paymentMonth);
+    additional.paidCount++;additional.paidAmountCents+=cents(payment.amount);
+    const daily=additional.daily[day]??{paidAmountCents:0,paidCount:0};daily.paidCount++;daily.paidAmountCents+=cents(payment.amount);additional.daily[day]=daily;
+    result.set(paymentMonth,additional);
+  }
+  return result;
+}
+function paymentTotals(order:ReportingOrder|null):{count:number;amount:number}{
+  return order?.status==='PAID'?{count:1+(order.duplicatePayments?.length??0),amount:order.amountCents+(order.duplicatePayments??[]).reduce((total,payment)=>total+cents(payment.amount),0)}:{count:0,amount:0};
 }
 /** Must be called in the SAME transaction as every order/status/fulfillment write.
  * A compact immutable-price order projection and bounded month/total counters are
@@ -92,6 +114,7 @@ export async function indexOrder(tx:Transaction,order:Order):Promise<boolean> {
     integrity(before.amountCents===stored.order.amountCents);
     integrity(before.id===after.id&&before.mode===after.mode&&before.clientId===after.clientId&&before.createdAt===after.createdAt&&before.amount===after.amount&&before.amountCents===after.amountCents
       &&before.productOrderId===after.productOrderId&&before.sku===after.sku&&before.subject===after.subject);
+    for(const payment of before.duplicatePayments??[])integrity((after.duplicatePayments??[]).some(next=>next.tradeNo===payment.tradeNo&&next.attemptId===payment.attemptId&&next.amount===payment.amount&&next.paidAt===payment.paidAt));
     if(JSON.stringify(before)===JSON.stringify(after))return false;
   }
   const previous=contributions(before),next=contributions(after),months=new Set([...previous.keys(),...next.keys()]);
@@ -108,8 +131,9 @@ export async function indexOrder(tx:Transaction,order:Order):Promise<boolean> {
       }
       tx.put(bucketPath,bucket);
     }
-    const paidDelta=Number(after.status==='PAID')-Number(before?.status==='PAID');
-    const amountDelta=(after.status==='PAID'?after.amountCents:0)-(before?.status==='PAID'?before.amountCents:0);
+    const nextPayments=paymentTotals(after),previousPayments=paymentTotals(before);
+    const paidDelta=nextPayments.count-previousPayments.count;
+    const amountDelta=nextPayments.amount-previousPayments.amount;
     if(paidDelta||amountDelta){
       const path=totalPath(after.mode,scope),bucket=checkedTotal(await tx.read<TotalBucket>(path),after.mode);
       bucket.paidCount=checkedAdd(bucket.paidCount,paidDelta);bucket.paidAmountCents=checkedAdd(bucket.paidAmountCents,amountDelta);tx.put(path,bucket);

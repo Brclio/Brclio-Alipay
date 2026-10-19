@@ -13,9 +13,13 @@ const DEFAULT_BASELINE = 'secrets/account-migration-rollback-final-2026101812274
 const SHA = /^[a-f0-9]{40}$/;
 const ORDER_PATH = /^orders\/(pay_[a-f0-9]{32})\.json$/;
 const EVENT_PATH = /^events\/(evt_pay_[a-f0-9]{32})\.json$/;
+const ATTEMPT_PATH = /^payment-attempts\/(pay_[a-f0-9]{32})\.json$/;
+const ACTION_PATH = /^order-actions\/(pay_[a-f0-9]{32})\/([a-f0-9]{64})\.json$/;
+const PAYMENT_WINDOW_MS = 10 * 60_000;
 const MAX_RECORD_BYTES = 256 * 1024;
 const REQUIRED_RUNTIME = ['GITHUB_TOKEN', 'CHECKOUT_SECRET', 'REGISTRY_ENCRYPTION_KEY'];
-const mutableOrderFields = new Set(['status', 'fulfillmentStatus', 'lastCheckedAt', 'tradeNo', 'paidAt']);
+const mutableOrderFields = new Set(['status', 'fulfillmentStatus', 'lastCheckedAt', 'tradeNo', 'paidAt',
+  'activeAttemptId', 'attemptTrackingVersion', 'paymentAttempts', 'adminOperation', 'recentActionIds', 'duplicatePayments']);
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const hmac = (key, value) => createHmac('sha256', key).update(value).digest('hex');
@@ -73,7 +77,7 @@ async function boundedJson(response, maxBytes) {
 }
 
 function checkedOrder(value, id) {
-  requireCheck(isRecord(value) && value.id === id && ['live', 'sandbox'].includes(value.mode)
+  requireCheck(isRecord(value) && /^pay_[a-f0-9]{32}$/.test(id) && value.id === id && ['live', 'sandbox'].includes(value.mode)
     && typeof value.clientId === 'string' && typeof value.productOrderId === 'string'
     && typeof value.sku === 'string' && typeof value.subject === 'string'
     && typeof value.returnUrl === 'string' && /^[a-f0-9]{64}$/.test(value.requestHash)
@@ -85,21 +89,129 @@ function checkedOrder(value, id) {
   requireCheck(value.status !== 'PAID' || (typeof value.tradeNo === 'string' && /^\d{10,64}$/.test(value.tradeNo)
     && validTime(value.paidAt)), 'ORDER_INVALID');
   requireCheck(value.fulfillmentStatus !== 'delivered' || value.status === 'PAID', 'ORDER_INVALID');
+  requireCheck(value.attemptTrackingVersion === undefined || value.attemptTrackingVersion === 1, 'ORDER_ATTEMPTS_INVALID');
+  if (value.paymentAttempts !== undefined) {
+    const attempts = value.paymentAttempts;
+    requireCheck(Array.isArray(attempts) && attempts.length > 0 && attempts.length <= 20
+      && attempts[0]?.id === id && new Set(attempts.map(attempt => attempt?.id)).size === attempts.length
+      && value.activeAttemptId === attempts.at(-1)?.id, 'ORDER_ATTEMPTS_INVALID');
+    for (const [index, attempt] of attempts.entries()) {
+      requireCheck(isRecord(attempt) && /^pay_[a-f0-9]{32}$/.test(attempt.id)
+        && validTime(attempt.createdAt) && validTime(attempt.expiresAt)
+        && ['PENDING', 'PAID', 'CLOSED'].includes(attempt.status)
+        && (attempt.closedAt === undefined || validTime(attempt.closedAt))
+        && (attempt.closeConfirmed === undefined || typeof attempt.closeConfirmed === 'boolean'), 'ORDER_ATTEMPTS_INVALID');
+      const start = Date.parse(attempt.createdAt), deadline = Date.parse(attempt.expiresAt);
+      requireCheck(index === 0 ? attempt.createdAt === value.createdAt
+        && deadline === Math.min(Date.parse(value.expiresAt), start + PAYMENT_WINDOW_MS)
+        : start >= Date.parse(attempts[index - 1].createdAt) && deadline === start + PAYMENT_WINDOW_MS, 'ORDER_ATTEMPT_WINDOW_INVALID');
+      requireCheck((attempt.linkIssuedAt === undefined || validTime(attempt.linkIssuedAt)
+        && Date.parse(attempt.linkIssuedAt) >= start && Date.parse(attempt.linkIssuedAt) <= deadline)
+        && (attempt.linkExpiresAt === undefined || attempt.linkIssuedAt !== undefined && validTime(attempt.linkExpiresAt)
+          && (attempt.linkExpiresAt === attempt.expiresAt || index === 0 && attempt.linkExpiresAt === value.expiresAt)), 'ORDER_ATTEMPT_LINK_INVALID');
+      requireCheck(attempt.status !== 'PAID' || value.status === 'PAID'
+        && typeof attempt.tradeNo === 'string' && /^\d{10,64}$/.test(attempt.tradeNo) && validTime(attempt.paidAt), 'ORDER_ATTEMPT_PAYMENT_INVALID');
+    }
+    const active = attempts.at(-1);
+    requireCheck(value.status === 'PAID' ? attempts.some(attempt => attempt.status === 'PAID'
+      && attempt.tradeNo === value.tradeNo && attempt.paidAt === value.paidAt) : active.status === value.status, 'ORDER_ATTEMPT_STATUS_MISMATCH');
+  } else requireCheck(value.activeAttemptId === undefined, 'ORDER_ATTEMPTS_INVALID');
+  if (value.adminOperation !== undefined) {
+    const operation = value.adminOperation;
+    requireCheck(isRecord(operation) && /^[A-Za-z0-9_-]{8,100}$/.test(operation.requestId)
+      && /^op_[a-f0-9]{32}$/.test(operation.token) && ['close', 'reopen', 'reconcile'].includes(operation.action)
+      && validTime(operation.expiresAt), 'ORDER_OPERATION_INVALID');
+  }
+  requireCheck(value.recentActionIds === undefined || Array.isArray(value.recentActionIds)
+    && value.recentActionIds.length <= 20 && new Set(value.recentActionIds).size === value.recentActionIds.length
+    && value.recentActionIds.every(requestId => typeof requestId === 'string' && /^[A-Za-z0-9_-]{8,100}$/.test(requestId)), 'ORDER_ACTION_REFERENCES_INVALID');
+  if (value.duplicatePayments !== undefined) {
+    const payments = value.duplicatePayments;
+    requireCheck(value.status === 'PAID' && Array.isArray(payments) && payments.length <= 19
+      && new Set(payments.map(payment => payment?.tradeNo)).size === payments.length, 'ORDER_DUPLICATE_PAYMENTS_INVALID');
+    for (const payment of payments) requireCheck(isRecord(payment) && payment.amount === value.amount
+      && payment.tradeNo !== value.tradeNo && typeof payment.tradeNo === 'string' && /^\d{10,64}$/.test(payment.tradeNo)
+      && validTime(payment.paidAt) && value.paymentAttempts?.some(attempt => attempt.id === payment.attemptId
+        && attempt.status === 'PAID' && attempt.tradeNo === payment.tradeNo && attempt.paidAt === payment.paidAt), 'ORDER_DUPLICATE_PAYMENTS_INVALID');
+  }
   return value;
+}
+function orderAttempts(order) {
+  return order.paymentAttempts ?? [{ id: order.id, createdAt: order.createdAt,
+    expiresAt: new Date(Math.min(Date.parse(order.expiresAt), Date.parse(order.createdAt) + PAYMENT_WINDOW_MS)).toISOString(),
+    status: order.status, ...(!order.attemptTrackingVersion ? { linkIssuedAt: order.createdAt, linkExpiresAt: order.expiresAt } : {}),
+    ...(order.tradeNo ? { tradeNo: order.tradeNo } : {}), ...(order.paidAt ? { paidAt: order.paidAt } : {}) }];
+}
+function checkedAction(record, orderId, digest) {
+  requireCheck(isRecord(record) && typeof record.requestId === 'string' && /^[A-Za-z0-9_-]{8,100}$/.test(record.requestId)
+    && sha256(record.requestId) === digest && /^pay_[a-f0-9]{32}$/.test(orderId)
+    && ['close', 'reopen', 'reconcile'].includes(record.action)
+    && typeof record.actor === 'string' && record.actor.length > 0 && record.actor.length <= 254
+    && typeof record.reason === 'string' && record.reason.trim().length > 0 && record.reason.length <= 500
+    && /^[a-f0-9]{64}$/.test(record.fingerprint) && validTime(record.startedAt)
+    && ['running', 'completed', 'failed'].includes(record.status)
+    && ['PENDING', 'PAID', 'CLOSED'].includes(record.beforeStatus)
+    && (record.completedAt === undefined || validTime(record.completedAt)
+      && Date.parse(record.completedAt) >= Date.parse(record.startedAt))
+    && (record.afterStatus === undefined || ['PENDING', 'PAID', 'CLOSED'].includes(record.afterStatus))
+    && (record.status !== 'completed' || validTime(record.completedAt) && record.afterStatus !== undefined), 'ORDER_ACTION_INVALID');
+  return record;
+}
+function auditedAttempt(attempt, actionRecords) {
+  return actionRecords.some(record => record.status === 'completed' && record.action === 'reopen'
+    && record.beforeStatus === 'CLOSED' && record.afterStatus === 'PENDING' && record.attemptId === attempt.id
+    && record.completedAt === attempt.createdAt && Date.parse(record.startedAt) <= Date.parse(attempt.createdAt));
+}
+export function needsPaidAttemptCleanup(order) {
+  checkedOrder(order, order?.id);
+  return order.status === 'PAID' && orderAttempts(order).some(attempt => attempt.status !== 'PAID'
+    && !attempt.closeConfirmed && !!attempt.linkIssuedAt);
+}
+export function verifyAttemptEvidence(order, { mappings = new Map(), actionRecords = [] } = {}) {
+  checkedOrder(order, order?.id);
+  for (const action of actionRecords) checkedAction(action, order.id, sha256(action?.requestId ?? ''));
+  for (const attempt of (order.paymentAttempts ?? []).slice(1)) {
+    requireCheck(mappings.has(attempt.id), 'PAYMENT_ATTEMPT_MAPPING_MISSING');
+    requireCheck(same(mappings.get(attempt.id), { orderId: order.id, mode: order.mode }), 'PAYMENT_ATTEMPT_MAPPING_INVALID');
+    requireCheck(auditedAttempt(attempt, actionRecords), 'ORDER_REOPEN_AUDIT_MISSING');
+  }
+  requireCheck((order.recentActionIds ?? []).every(requestId => actionRecords.some(action => action.requestId === requestId)), 'ORDER_ACTION_REFERENCES_INVALID');
+  requireCheck(!order.adminOperation || actionRecords.some(action => action.requestId === order.adminOperation.requestId
+    && action.action === order.adminOperation.action && action.status === 'running'), 'ORDER_OPERATION_AUDIT_MISSING');
+  return true;
 }
 function advances(before, after) {
   return before === after || (before === 'PENDING' && ['CLOSED', 'PAID'].includes(after))
     || (before === 'CLOSED' && after === 'PAID');
 }
-export function verifyOrderContinuity(before, after) {
+export function verifyOrderContinuity(before, after, { actionRecords = [] } = {}) {
   checkedOrder(before, before?.id); checkedOrder(after, before.id);
+  requireCheck(Array.isArray(actionRecords), 'ORDER_ACTION_INVALID');
+  for (const record of actionRecords) checkedAction(record, before.id, sha256(record?.requestId ?? ''));
   const immutable = value => Object.fromEntries(Object.entries(value).filter(([key]) => !mutableOrderFields.has(key)));
   requireCheck(same(immutable(before), immutable(after)), 'ORDER_IMMUTABLE_FIELDS_CHANGED');
-  requireCheck(advances(before.status, after.status), 'ORDER_STATUS_REGRESSED');
+  const originalAttempts = orderAttempts(before), currentAttempts = orderAttempts(after);
+  requireCheck(currentAttempts.length >= originalAttempts.length, 'ORDER_ATTEMPTS_REMOVED');
+  for (const [index, attempt] of originalAttempts.entries()) {
+    const current = currentAttempts[index];
+    requireCheck(current?.id === attempt.id && current.createdAt === attempt.createdAt
+      && current.expiresAt === attempt.expiresAt, 'ORDER_ATTEMPT_IMMUTABLE_FIELDS_CHANGED');
+    requireCheck(advances(attempt.status, current.status), 'ORDER_ATTEMPT_STATUS_REGRESSED');
+    for (const key of ['tradeNo', 'paidAt', 'linkIssuedAt', 'linkExpiresAt', 'closedAt']) {
+      requireCheck(attempt[key] === undefined || current[key] === attempt[key], 'ORDER_ATTEMPT_HISTORY_CHANGED');
+    }
+  }
+  const addedAttempts = currentAttempts.slice(originalAttempts.length);
+  for (const attempt of addedAttempts) requireCheck(auditedAttempt(attempt, actionRecords), 'ORDER_REOPEN_AUDIT_MISSING');
+  const reopened = addedAttempts.length > 0 && after.activeAttemptId === currentAttempts.at(-1).id;
+  requireCheck(!reopened || before.status !== 'PAID', 'ORDER_STATUS_REGRESSED');
+  requireCheck(advances(before.status, after.status) || before.status === 'CLOSED' && after.status === 'PENDING' && reopened, 'ORDER_STATUS_REGRESSED');
+  requireCheck(before.attemptTrackingVersion === undefined || after.attemptTrackingVersion === before.attemptTrackingVersion, 'ORDER_ATTEMPT_TRACKING_REGRESSED');
   requireCheck(before.fulfillmentStatus !== 'delivered' || after.fulfillmentStatus === 'delivered', 'FULFILLMENT_REGRESSED');
   for (const key of ['tradeNo', 'paidAt']) requireCheck(before[key] === undefined || before[key] === after[key], 'ORDER_PAYMENT_FIELDS_CHANGED');
-  requireCheck(before.lastCheckedAt === undefined || (validTime(after.lastCheckedAt)
+  requireCheck(before.lastCheckedAt === undefined || reopened && after.lastCheckedAt === undefined || (validTime(after.lastCheckedAt)
     && Date.parse(after.lastCheckedAt) >= Date.parse(before.lastCheckedAt)), 'ORDER_CHECK_TIME_REGRESSED');
+  for (const payment of before.duplicatePayments ?? []) requireCheck(after.duplicatePayments?.some(current => same(current, payment)), 'ORDER_DUPLICATE_PAYMENT_REMOVED');
   return before.status !== after.status;
 }
 
@@ -135,12 +247,13 @@ async function decryptRegistry(envelope, key) {
   return state;
 }
 
-function expectedOrderView(order, client, channels) {
+export function expectedOrderView(order, client, channels) {
   const returnUrl = new URL(order.returnUrl);
   returnUrl.searchParams.set('payment_order_id', order.id);
   returnUrl.searchParams.set('product_order_id', order.productOrderId);
   return { id: order.id, subject: order.subject, amount: order.amount, currency: 'CNY', status: order.status,
-    productName: client.name, expiresAt: order.expiresAt, returnUrl: returnUrl.toString(),
+    productName: client.name, expiresAt: order.paymentAttempts ? orderAttempts(order).at(-1).expiresAt
+      : order.status === 'PENDING' ? orderAttempts(order)[0].expiresAt : order.expiresAt, returnUrl: returnUrl.toString(),
     fulfillmentStatus: order.fulfillmentStatus, mode: order.mode, channels };
 }
 function comparePublicOrder(response, order, client, channels, product) {
@@ -161,7 +274,7 @@ function comparePublicOrder(response, order, client, channels, product) {
   requireCheck(response.fulfillmentStatus !== 'delivered' || response.status === 'PAID', 'PUBLIC_ORDER_INVALID');
 }
 
-async function verifyReporting(entries, record, orders) {
+export async function verifyReporting(entries, record, orders) {
   const summaries = new Map(), indexed = new Set();
   const dateOf = value => new Date(Date.parse(value) + 8 * 3600_000).toISOString().slice(0, 10);
   const zero = () => ({ paidAmountCents: 0, paidCount: 0, pendingCount: 0, closedCount: 0, deliveryPendingCount: 0 });
@@ -176,7 +289,8 @@ async function verifyReporting(entries, record, orders) {
       productOrderId: order.productOrderId, sku: order.sku, subject: order.subject, amount: order.amount,
       amountCents: Math.round(Number(order.amount) * 100), status: order.status, createdAt: order.createdAt,
       expiresAt: order.expiresAt, ...(order.paidAt ? { paidAt: order.paidAt } : {}),
-      ...(order.tradeNo ? { tradeNo: order.tradeNo } : {}), fulfillmentStatus: order.fulfillmentStatus };
+      ...(order.tradeNo ? { tradeNo: order.tradeNo } : {}), fulfillmentStatus: order.fulfillmentStatus,
+      ...(order.duplicatePayments?.length ? { duplicatePayments: order.duplicatePayments.map(payment => ({ ...payment })) } : {}) };
     const indexKey = new Date(order.createdAt).toISOString().replace(/[-:.]/g, '') + '_' + order.id;
     requireCheck(filename === `reporting/v1/orders/${order.mode}/${dateOf(order.createdAt).slice(0, 7)}/${indexKey}.json`
       && !indexed.has(order.id) && same(value, { schema: 1, order: projected }), 'REPORTING_ORDER_MISMATCH');
@@ -196,6 +310,17 @@ async function verifyReporting(entries, record, orders) {
         const totalPath = prefix + 'total.json';
         if (!summaries.has(totalPath)) summaries.set(totalPath, totalBucket(order.mode));
         summaries.get(totalPath).paidCount++; summaries.get(totalPath).paidAmountCents += projected.amountCents;
+      }
+      for (const payment of order.duplicatePayments ?? []) {
+        const day = dateOf(payment.paidAt), extraMonth = day.slice(0, 7), extraPath = prefix + 'months/' + extraMonth + '.json';
+        if (!summaries.has(extraPath)) summaries.set(extraPath, monthBucket(order.mode, extraMonth));
+        const extra = summaries.get(extraPath), amount = Math.round(Number(payment.amount) * 100);
+        extra.paidCount++; extra.paidAmountCents += amount;
+        extra.daily[day] ??= { paidAmountCents: 0, paidCount: 0 };
+        extra.daily[day].paidCount++; extra.daily[day].paidAmountCents += amount;
+        const totalPath = prefix + 'total.json';
+        if (!summaries.has(totalPath)) summaries.set(totalPath, totalBucket(order.mode));
+        summaries.get(totalPath).paidCount++; summaries.get(totalPath).paidAmountCents += amount;
       }
     }
   }
@@ -320,6 +445,26 @@ export async function verifyMigration({ runtime, baseline = null, baseUrls, expe
     const id = ORDER_PATH.exec(filename)[1];
     orders.set(id, checkedOrder(await record(filename), id));
   }
+  const orderActions = new Map();
+  for (const [filename] of entries) if (filename.startsWith('order-actions/')) {
+    const match = ACTION_PATH.exec(filename);
+    requireCheck(match && orders.has(match[1]), 'ORDER_ACTION_PATH_INVALID');
+    const action = checkedAction(await record(filename), match[1], match[2]);
+    if (!orderActions.has(match[1])) orderActions.set(match[1], []);
+    orderActions.get(match[1]).push(action);
+  }
+  const attemptMappings = new Map();
+  for (const [filename] of entries) if (filename.startsWith('payment-attempts/')) {
+    const match = ATTEMPT_PATH.exec(filename), mapping = await record(filename);
+    const order = isRecord(mapping) ? orders.get(mapping.orderId) : undefined;
+    requireCheck(match && order && same(mapping, { orderId: order.id, mode: order.mode })
+      && match[1] !== order.id && order.paymentAttempts?.some(attempt => attempt.id === match[1]), 'PAYMENT_ATTEMPT_MAPPING_INVALID');
+    attemptMappings.set(match[1], mapping);
+  }
+  for (const order of orders.values()) {
+    const actions = orderActions.get(order.id) ?? [];
+    verifyAttemptEvidence(order, { mappings: attemptMappings, actionRecords: actions });
+  }
   const deliveries = new Map();
   for (const [filename] of entries) if (EVENT_PATH.test(filename)) {
     const delivery = await record(filename);
@@ -338,8 +483,9 @@ export async function verifyMigration({ runtime, baseline = null, baseUrls, expe
   const queue = await record('system/queue.json');
   requireCheck(isRecord(queue) && Array.isArray(queue.orders) && Array.isArray(queue.deliveries)
     && queue.orders.length === new Set(queue.orders).size && queue.deliveries.length === new Set(queue.deliveries).size
-    && queue.orders.every(id => orders.has(id) && orders.get(id).status === 'PENDING')
+    && queue.orders.every(id => orders.has(id) && (orders.get(id).status === 'PENDING' || needsPaidAttemptCleanup(orders.get(id))))
     && queue.deliveries.every(id => deliveries.has(id) && !deliveries.get(id).deliveredAt), 'QUEUE_INVALID');
+  for (const order of orders.values()) requireCheck(!needsPaidAttemptCleanup(order) || queue.orders.includes(order.id), 'PAID_ATTEMPT_CLEANUP_NOT_QUEUED');
   const reporting = await verifyReporting(entries, record, orders);
 
   let historicalBlobCount = 0, unchangedHistoricalBlobCount = 0, changedHistoricalOrderCount = 0;
@@ -365,11 +511,23 @@ export async function verifyMigration({ runtime, baseline = null, baseUrls, expe
       if (current.sha === oldSha) { unchangedHistoricalBlobCount++; continue; }
       if (ORDER_PATH.test(filename)) {
         changedHistoricalOrderCount++;
-        if (verifyOrderContinuity(await blob(oldSha), orders.get(ORDER_PATH.exec(filename)[1]))) advancedHistoricalOrderCount++;
+        const id = ORDER_PATH.exec(filename)[1];
+        if (verifyOrderContinuity(await blob(oldSha), orders.get(id), { actionRecords: orderActions.get(id) ?? [] })) advancedHistoricalOrderCount++;
       } else if (EVENT_PATH.test(filename)) {
         const before = await blob(oldSha), after = await record(filename);
         requireCheck(same(before.event, after.event) && after.attempts >= before.attempts
           && (before.deliveredAt === undefined || before.deliveredAt === after.deliveredAt), 'HISTORICAL_OUTBOX_CHANGED');
+        mutableHistoricalBlobCount++;
+      } else if (ACTION_PATH.test(filename)) {
+        const match = ACTION_PATH.exec(filename), before = checkedAction(await blob(oldSha), match[1], match[2]);
+        const after = checkedAction(await record(filename), match[1], match[2]);
+        const completed = before.status === 'running' && ['completed', 'failed'].includes(after.status);
+        const latePaidProof = before.status === 'failed' && after.status === 'failed'
+          && before.errorCode === 'OPERATION_EXPIRED' && after.errorCode === 'OPERATION_EXPIRED'
+          && after.afterStatus === 'PAID' && orders.get(match[1]).status === 'PAID'
+          && validTime(after.completedAt) && Date.parse(after.completedAt) >= Date.parse(before.completedAt);
+        requireCheck((completed || latePaidProof)
+          && ['requestId', 'action', 'actor', 'reason', 'fingerprint', 'startedAt', 'beforeStatus'].every(key => same(before[key], after[key])), 'HISTORICAL_ORDER_ACTION_CHANGED');
         mutableHistoricalBlobCount++;
       } else if (filename === 'system/queue.json' || filename.startsWith('reporting/v1/')) {
         // Queue/reporting are mutable projections, not purchase snapshots. Their old blobs
@@ -383,7 +541,8 @@ export async function verifyMigration({ runtime, baseline = null, baseUrls, expe
         && item.entry.sha === baseline.pathBlobShas[item.entry.path], 'BASELINE_ORDER_INVALID');
       const before = await blob(item.entry.sha);
       requireCheck(same(before, item.order), 'BASELINE_ORDER_SNAPSHOT_MISMATCH');
-      verifyOrderContinuity(before, orders.get(ORDER_PATH.exec(item.entry.path)[1]));
+      const id = ORDER_PATH.exec(item.entry.path)[1];
+      verifyOrderContinuity(before, orders.get(id), { actionRecords: orderActions.get(id) ?? [] });
     }
   }
   const result = {
@@ -395,7 +554,9 @@ export async function verifyMigration({ runtime, baseline = null, baseUrls, expe
     originalRuntimeBackupVerified,
     registryClientCount: registry.clients.length, registryGrantCount: registry.grants.length,
     registryPlanCount: registry.plans.length, registryAuditCount: registry.audit.length,
-    orderCount: orders.size, eventCount: deliveries.size, queuedOrderCount: queue.orders.length,
+    orderCount: orders.size, eventCount: deliveries.size, paymentAttemptCount: attemptMappings.size,
+    orderActionCount: [...orderActions.values()].reduce((count, actions) => count + actions.length, 0),
+    queuedOrderCount: queue.orders.length, queuedPaidCleanupCount: queue.orders.filter(id => needsPaidAttemptCleanup(orders.get(id))).length,
     queuedDeliveryCount: queue.deliveries.length, historicalBlobCount, unchangedHistoricalBlobCount,
     changedHistoricalOrderCount, advancedHistoricalOrderCount, mutableHistoricalBlobCount,
     ...reporting, targets: [],
@@ -461,8 +622,11 @@ consistency/access is verified. Expected mode, channels, switch and version come
 from wrangler.jsonc/package.json. No credentials, personal records, identifiers,
 amounts or origin URLs are printed or saved in evidence, only counts/flags/hashes.
 Mutable queue/reporting blobs may legitimately change; their old blobs must
-remain in ancestor history. Current reporting projections and counters are
-recomputed from indexed orders; incomplete legacy coverage is explicitly counted.
+remain in ancestor history. Audited reopening preserves the logical purchase,
+uses a fresh mapped attempt and has a ten-minute window. PAID orders may remain
+queued only for closing other issued attempts. Historical paid identities stay
+immutable. Reporting recomputes every unique real receipt, including additional
+payments by their own Shanghai date; incomplete legacy coverage is counted.
 This check does not verify actual money/entitlements,
 DNS ownership, target Cloudflare account, cron execution or deployment triggers.\n`;
 }
